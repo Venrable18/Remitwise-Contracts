@@ -294,6 +294,28 @@ fn generate_financial_health_report(env: Env, user: Address) -> FinancialHealthR
 - **Event Logging:** Complete audit trail
 - **Panic Handling:** Fail-fast on invalid operations
 
+### Migration Payload Guardrails
+
+The `data_migration` crate applies bounded import/export rules so migration endpoints fail fast on oversized requests instead of spending unbounded CPU or memory on serialization work.
+
+- `MAX_MIGRATION_PAYLOAD_BYTES = 65,536` bytes for canonical payload JSON, CSV exports, and decrypted payload bodies
+- `MAX_MIGRATION_RECORDS = 1,024` logical records per migration payload
+- `MAX_MIGRATION_SNAPSHOT_BYTES = 98,304` bytes for serialized JSON and binary snapshot envelopes before deserialization
+- `MAX_ENCRYPTED_PAYLOAD_BYTES = 87,384` bytes for base64-encoded encrypted payload imports
+
+Record counting is payload-specific:
+
+- `RemittanceSplit` snapshots count as `1` record
+- `SavingsGoals` snapshots count `goals.len()`
+- `Generic` snapshots count top-level map entries
+
+Security assumptions:
+
+1. Import handlers reject oversized JSON and binary envelopes before `serde_json` or `bincode` deserialization, reducing denial-of-service exposure from large request bodies.
+2. CSV imports are bounded by both total byte size and row count, so large tabular migrations must be chunked across multiple requests.
+3. Checksum validation uses canonical JSON bytes, with generic map keys sorted before hashing, so checksum verification stays deterministic across export/import cycles.
+4. Operators needing larger migrations should split them off-chain into multiple bounded snapshots rather than increasing on-chain limits.
+
 ## Event Architecture
 
 ### Event Naming Conventions

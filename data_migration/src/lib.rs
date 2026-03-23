@@ -8,13 +8,39 @@
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Current schema version for migration compatibility.
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// Minimum supported schema version for import.
 pub const MIN_SUPPORTED_VERSION: u32 = 1;
+
+/// Maximum allowed canonical payload size for migration snapshots.
+///
+/// @dev This caps memory and CPU spent on checksum generation, serialization,
+/// and deserialization for a single migration payload.
+pub const MAX_MIGRATION_PAYLOAD_BYTES: usize = 64 * 1024;
+
+/// Maximum allowed number of logical records in a migration payload.
+///
+/// @dev Record counting is payload-specific:
+/// - `RemittanceSplit`: always `1`
+/// - `SavingsGoals`: `goals.len()`
+/// - `Generic`: number of top-level map entries
+pub const MAX_MIGRATION_RECORDS: usize = 1_024;
+
+/// Maximum allowed serialized snapshot size accepted by JSON and binary imports.
+///
+/// @dev This is larger than `MAX_MIGRATION_PAYLOAD_BYTES` to account for
+/// snapshot metadata and encoding overhead while still rejecting oversized
+/// requests before deserialization.
+pub const MAX_MIGRATION_SNAPSHOT_BYTES: usize = MAX_MIGRATION_PAYLOAD_BYTES + (32 * 1024);
+
+/// Maximum allowed size for base64-encoded encrypted payload imports.
+///
+/// @dev Base64 expands 3 bytes of input into 4 bytes of output.
+pub const MAX_ENCRYPTED_PAYLOAD_BYTES: usize = MAX_MIGRATION_PAYLOAD_BYTES.div_ceil(3) * 4;
 
 /// Versioned migration event payload meant for indexing and historical tracking.
 ///
@@ -75,6 +101,20 @@ pub enum SnapshotPayload {
     Generic(HashMap<String, serde_json::Value>),
 }
 
+impl SnapshotPayload {
+    /// Return the logical record count used for migration guardrails.
+    ///
+    /// @dev Generic payloads count top-level entries as records so callers can
+    /// chunk large datasets instead of sending one oversized import.
+    pub fn record_count(&self) -> usize {
+        match self {
+            SnapshotPayload::RemittanceSplit(_) => 1,
+            SnapshotPayload::SavingsGoals(export) => export.goals.len(),
+            SnapshotPayload::Generic(entries) => entries.len(),
+        }
+    }
+}
+
 /// Exportable remittance split config (mirrors contract SplitConfig).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemittanceSplitExport {
@@ -104,11 +144,22 @@ pub struct SavingsGoalExport {
 }
 
 impl ExportSnapshot {
+    fn payload_bytes(&self) -> Result<Vec<u8>, MigrationError> {
+        canonical_payload_bytes(&self.payload)
+    }
+
+    fn checksum_for_payload_bytes(payload_bytes: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(payload_bytes);
+        hex::encode(hasher.finalize().as_ref())
+    }
+
     /// Compute SHA256 checksum of the payload (canonical JSON).
     pub fn compute_checksum(&self) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(serde_json::to_vec(&self.payload).unwrap_or_else(|_| panic!("payload must be serializable")));
-        hex::encode(hasher.finalize().as_ref())
+        let payload_bytes = self
+            .payload_bytes()
+            .unwrap_or_else(|_| panic!("payload must be serializable"));
+        Self::checksum_for_payload_bytes(&payload_bytes)
     }
 
     /// Verify stored checksum matches payload.
@@ -121,7 +172,16 @@ impl ExportSnapshot {
         self.header.version >= MIN_SUPPORTED_VERSION && self.header.version <= SCHEMA_VERSION
     }
 
-    /// Validate snapshot for import: version and checksum.
+    /// Validate payload size and logical record bounds.
+    ///
+    /// @dev Export paths call this before serializing so oversized payloads fail
+    /// fast. Import paths reuse the same checks after decoding the envelope.
+    pub fn validate_payload_constraints(&self) -> Result<(), MigrationError> {
+        let payload_bytes = self.payload_bytes()?;
+        validate_payload_bounds(self.payload.record_count(), payload_bytes.len())
+    }
+
+    /// Validate snapshot for import: version, payload bounds, and checksum.
     pub fn validate_for_import(&self) -> Result<(), MigrationError> {
         if !self.is_version_compatible() {
             return Err(MigrationError::IncompatibleVersion {
@@ -130,7 +190,9 @@ impl ExportSnapshot {
                 max: SCHEMA_VERSION,
             });
         }
-        if !self.verify_checksum() {
+        let payload_bytes = self.payload_bytes()?;
+        validate_payload_bounds(self.payload.record_count(), payload_bytes.len())?;
+        if self.header.checksum != Self::checksum_for_payload_bytes(&payload_bytes) {
             return Err(MigrationError::ChecksumMismatch);
         }
         Ok(())
@@ -161,11 +223,75 @@ fn format_label(f: ExportFormat) -> String {
     }
 }
 
+fn canonical_payload_bytes(payload: &SnapshotPayload) -> Result<Vec<u8>, MigrationError> {
+    match payload {
+        SnapshotPayload::RemittanceSplit(export) => {
+            serialize_json_bytes(&serde_json::json!({ "RemittanceSplit": export }))
+        }
+        SnapshotPayload::SavingsGoals(export) => {
+            serialize_json_bytes(&serde_json::json!({ "SavingsGoals": export }))
+        }
+        SnapshotPayload::Generic(entries) => {
+            let ordered_entries: BTreeMap<&str, &serde_json::Value> = entries
+                .iter()
+                .map(|(key, value)| (key.as_str(), value))
+                .collect();
+            serialize_json_bytes(&serde_json::json!({ "Generic": ordered_entries }))
+        }
+    }
+}
+
+fn serialize_json_bytes<T>(value: &T) -> Result<Vec<u8>, MigrationError>
+where
+    T: Serialize,
+{
+    serde_json::to_vec(value).map_err(|e| MigrationError::DeserializeError(e.to_string()))
+}
+
+fn validate_payload_bounds(record_count: usize, payload_len: usize) -> Result<(), MigrationError> {
+    if record_count > MAX_MIGRATION_RECORDS {
+        return Err(MigrationError::TooManyRecords {
+            count: record_count,
+            max: MAX_MIGRATION_RECORDS,
+        });
+    }
+    if payload_len > MAX_MIGRATION_PAYLOAD_BYTES {
+        return Err(MigrationError::PayloadTooLarge {
+            size: payload_len,
+            max: MAX_MIGRATION_PAYLOAD_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn validate_snapshot_size(snapshot_len: usize) -> Result<(), MigrationError> {
+    if snapshot_len > MAX_MIGRATION_SNAPSHOT_BYTES {
+        return Err(MigrationError::SnapshotTooLarge {
+            size: snapshot_len,
+            max: MAX_MIGRATION_SNAPSHOT_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn validate_encrypted_payload_size(encoded_len: usize) -> Result<(), MigrationError> {
+    if encoded_len > MAX_ENCRYPTED_PAYLOAD_BYTES {
+        return Err(MigrationError::PayloadTooLarge {
+            size: encoded_len,
+            max: MAX_ENCRYPTED_PAYLOAD_BYTES,
+        });
+    }
+    Ok(())
+}
+
 /// Migration/import errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MigrationError {
     IncompatibleVersion { found: u32, min: u32, max: u32 },
     ChecksumMismatch,
+    PayloadTooLarge { size: usize, max: usize },
+    SnapshotTooLarge { size: usize, max: usize },
+    TooManyRecords { count: usize, max: usize },
     InvalidFormat(String),
     ValidationFailed(String),
     DeserializeError(String),
@@ -182,6 +308,15 @@ impl std::fmt::Display for MigrationError {
                 )
             }
             MigrationError::ChecksumMismatch => write!(f, "checksum mismatch"),
+            MigrationError::PayloadTooLarge { size, max } => {
+                write!(f, "payload too large: {} bytes (max {})", size, max)
+            }
+            MigrationError::SnapshotTooLarge { size, max } => {
+                write!(f, "snapshot too large: {} bytes (max {})", size, max)
+            }
+            MigrationError::TooManyRecords { count, max } => {
+                write!(f, "too many records: {} (max {})", count, max)
+            }
             MigrationError::InvalidFormat(s) => write!(f, "invalid format: {}", s),
             MigrationError::ValidationFailed(s) => write!(f, "validation failed: {}", s),
             MigrationError::DeserializeError(s) => write!(f, "deserialize error: {}", s),
@@ -193,16 +328,27 @@ impl std::error::Error for MigrationError {}
 
 /// Export snapshot to JSON bytes.
 pub fn export_to_json(snapshot: &ExportSnapshot) -> Result<Vec<u8>, MigrationError> {
-    serde_json::to_vec_pretty(snapshot).map_err(|e| MigrationError::DeserializeError(e.to_string()))
+    snapshot.validate_payload_constraints()?;
+    let bytes = serde_json::to_vec_pretty(snapshot)
+        .map_err(|e| MigrationError::DeserializeError(e.to_string()))?;
+    validate_snapshot_size(bytes.len())?;
+    Ok(bytes)
 }
 
 /// Export snapshot to binary bytes (bincode).
 pub fn export_to_binary(snapshot: &ExportSnapshot) -> Result<Vec<u8>, MigrationError> {
-    bincode::serialize(snapshot).map_err(|e| MigrationError::DeserializeError(e.to_string()))
+    snapshot.validate_payload_constraints()?;
+    let bytes = bincode::serialize(snapshot)
+        .map_err(|e| MigrationError::DeserializeError(e.to_string()))?;
+    validate_snapshot_size(bytes.len())?;
+    Ok(bytes)
 }
 
 /// Export to CSV (for tabular payloads only; e.g. goals list).
 pub fn export_to_csv(payload: &SavingsGoalsExport) -> Result<Vec<u8>, MigrationError> {
+    let payload_bytes = serialize_json_bytes(payload)?;
+    validate_payload_bounds(payload.goals.len(), payload_bytes.len())?;
+
     let mut wtr = csv::Writer::from_writer(Vec::new());
     wtr.write_record([
         "id",
@@ -228,24 +374,50 @@ pub fn export_to_csv(payload: &SavingsGoalsExport) -> Result<Vec<u8>, MigrationE
     }
     wtr.flush()
         .map_err(|e| MigrationError::InvalidFormat(e.to_string()))?;
-    wtr.into_inner()
-        .map_err(|e| MigrationError::InvalidFormat(e.to_string()))
+    let csv_bytes = wtr
+        .into_inner()
+        .map_err(|e| MigrationError::InvalidFormat(e.to_string()))?;
+    if csv_bytes.len() > MAX_MIGRATION_PAYLOAD_BYTES {
+        return Err(MigrationError::PayloadTooLarge {
+            size: csv_bytes.len(),
+            max: MAX_MIGRATION_PAYLOAD_BYTES,
+        });
+    }
+    Ok(csv_bytes)
 }
 
 /// Encrypted format: store base64-encoded payload (caller encrypts before passing).
-pub fn export_to_encrypted_payload(plain_bytes: &[u8]) -> String {
-    base64::engine::general_purpose::STANDARD.encode(plain_bytes)
+pub fn export_to_encrypted_payload(plain_bytes: &[u8]) -> Result<String, MigrationError> {
+    if plain_bytes.len() > MAX_MIGRATION_PAYLOAD_BYTES {
+        return Err(MigrationError::PayloadTooLarge {
+            size: plain_bytes.len(),
+            max: MAX_MIGRATION_PAYLOAD_BYTES,
+        });
+    }
+    Ok(base64::engine::general_purpose::STANDARD.encode(plain_bytes))
 }
 
 /// Decode encrypted payload from base64 (caller decrypts after).
 pub fn import_from_encrypted_payload(encoded: &str) -> Result<Vec<u8>, MigrationError> {
+    validate_encrypted_payload_size(encoded.len())?;
     base64::engine::general_purpose::STANDARD
         .decode(encoded)
         .map_err(|e| MigrationError::InvalidFormat(e.to_string()))
+        .and_then(|bytes| {
+            if bytes.len() > MAX_MIGRATION_PAYLOAD_BYTES {
+                Err(MigrationError::PayloadTooLarge {
+                    size: bytes.len(),
+                    max: MAX_MIGRATION_PAYLOAD_BYTES,
+                })
+            } else {
+                Ok(bytes)
+            }
+        })
 }
 
 /// Import snapshot from JSON bytes with validation.
 pub fn import_from_json(bytes: &[u8]) -> Result<ExportSnapshot, MigrationError> {
+    validate_snapshot_size(bytes.len())?;
     let snapshot: ExportSnapshot = serde_json::from_slice(bytes)
         .map_err(|e| MigrationError::DeserializeError(e.to_string()))?;
     snapshot.validate_for_import()?;
@@ -254,6 +426,7 @@ pub fn import_from_json(bytes: &[u8]) -> Result<ExportSnapshot, MigrationError> 
 
 /// Import snapshot from binary bytes with validation.
 pub fn import_from_binary(bytes: &[u8]) -> Result<ExportSnapshot, MigrationError> {
+    validate_snapshot_size(bytes.len())?;
     let snapshot: ExportSnapshot =
         bincode::deserialize(bytes).map_err(|e| MigrationError::DeserializeError(e.to_string()))?;
     snapshot.validate_for_import()?;
@@ -262,9 +435,22 @@ pub fn import_from_binary(bytes: &[u8]) -> Result<ExportSnapshot, MigrationError
 
 /// Import goals from CSV into SavingsGoalsExport (no header checksum; use for merge/import).
 pub fn import_goals_from_csv(bytes: &[u8]) -> Result<Vec<SavingsGoalExport>, MigrationError> {
+    if bytes.len() > MAX_MIGRATION_PAYLOAD_BYTES {
+        return Err(MigrationError::PayloadTooLarge {
+            size: bytes.len(),
+            max: MAX_MIGRATION_PAYLOAD_BYTES,
+        });
+    }
+
     let mut rdr = csv::Reader::from_reader(bytes);
     let mut goals = Vec::new();
     for result in rdr.deserialize() {
+        if goals.len() == MAX_MIGRATION_RECORDS {
+            return Err(MigrationError::TooManyRecords {
+                count: MAX_MIGRATION_RECORDS + 1,
+                max: MAX_MIGRATION_RECORDS,
+            });
+        }
         let record: CsvGoalRow =
             result.map_err(|e| MigrationError::DeserializeError(e.to_string()))?;
         goals.push(SavingsGoalExport {
@@ -328,6 +514,25 @@ mod hex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_goal(id: u32) -> SavingsGoalExport {
+        SavingsGoalExport {
+            id,
+            owner: "G1".into(),
+            name: format!("Goal {id}"),
+            target_amount: 1_000,
+            current_amount: 100,
+            target_date: 2_000_000_000,
+            locked: false,
+        }
+    }
+
+    fn sample_goals_export(count: usize) -> SavingsGoalsExport {
+        SavingsGoalsExport {
+            next_id: count as u32,
+            goals: (1..=count as u32).map(sample_goal).collect(),
+        }
+    }
 
     #[test]
     fn test_snapshot_checksum_roundtrip_succeeds() {
@@ -403,19 +608,15 @@ mod tests {
         let export = SavingsGoalsExport {
             next_id: 2,
             goals: vec![SavingsGoalExport {
-                id: 1,
-                owner: "G1".into(),
-                name: "Emergency".into(),
-                target_amount: 1000,
-                current_amount: 500,
-                target_date: 2000000000,
                 locked: true,
+                current_amount: 500,
+                ..sample_goal(1)
             }],
         };
         let csv_bytes = export_to_csv(&export).unwrap();
         let goals = import_goals_from_csv(&csv_bytes).unwrap();
         assert_eq!(goals.len(), 1);
-        assert_eq!(goals[0].name, "Emergency");
+        assert_eq!(goals[0].name, "Goal 1");
         assert_eq!(goals[0].target_amount, 1000);
     }
 
@@ -439,5 +640,156 @@ mod tests {
 
         let MigrationEvent::V1(v1) = loaded;
         assert_eq!(v1.version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_export_rejects_payload_larger_than_limit() {
+        let mut entries = HashMap::new();
+        entries.insert(
+            "blob".into(),
+            serde_json::Value::String("x".repeat(MAX_MIGRATION_PAYLOAD_BYTES)),
+        );
+        let snapshot = ExportSnapshot::new(SnapshotPayload::Generic(entries), ExportFormat::Json);
+
+        assert!(matches!(
+            export_to_json(&snapshot),
+            Err(MigrationError::PayloadTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn test_export_binary_rejects_too_many_records() {
+        let payload = SnapshotPayload::SavingsGoals(sample_goals_export(MAX_MIGRATION_RECORDS + 1));
+        let snapshot = ExportSnapshot::new(payload, ExportFormat::Binary);
+
+        assert_eq!(
+            export_to_binary(&snapshot),
+            Err(MigrationError::TooManyRecords {
+                count: MAX_MIGRATION_RECORDS + 1,
+                max: MAX_MIGRATION_RECORDS,
+            })
+        );
+    }
+
+    #[test]
+    fn test_import_json_rejects_oversized_snapshot_before_deserialize() {
+        let oversized = vec![b' '; MAX_MIGRATION_SNAPSHOT_BYTES + 1];
+
+        assert!(matches!(
+            import_from_json(&oversized),
+            Err(MigrationError::SnapshotTooLarge {
+                size,
+                max: MAX_MIGRATION_SNAPSHOT_BYTES,
+            }) if size == MAX_MIGRATION_SNAPSHOT_BYTES + 1
+        ));
+    }
+
+    #[test]
+    fn test_import_binary_rejects_oversized_snapshot_before_deserialize() {
+        let oversized = vec![0u8; MAX_MIGRATION_SNAPSHOT_BYTES + 1];
+
+        assert!(matches!(
+            import_from_binary(&oversized),
+            Err(MigrationError::SnapshotTooLarge {
+                size,
+                max: MAX_MIGRATION_SNAPSHOT_BYTES,
+            }) if size == MAX_MIGRATION_SNAPSHOT_BYTES + 1
+        ));
+    }
+
+    #[test]
+    fn test_export_accepts_max_record_count_when_payload_fits_size_limit() {
+        let entries: HashMap<String, serde_json::Value> = (0..MAX_MIGRATION_RECORDS)
+            .map(|idx| (format!("k{idx}"), serde_json::json!(idx)))
+            .collect();
+        let snapshot = ExportSnapshot::new(SnapshotPayload::Generic(entries), ExportFormat::Json);
+
+        let bytes = export_to_json(&snapshot).unwrap();
+        let loaded = import_from_json(&bytes).unwrap();
+
+        assert_eq!(loaded.payload.record_count(), MAX_MIGRATION_RECORDS);
+    }
+
+    #[test]
+    fn test_csv_export_rejects_too_many_records() {
+        let export = sample_goals_export(MAX_MIGRATION_RECORDS + 1);
+
+        assert_eq!(
+            export_to_csv(&export),
+            Err(MigrationError::TooManyRecords {
+                count: MAX_MIGRATION_RECORDS + 1,
+                max: MAX_MIGRATION_RECORDS,
+            })
+        );
+    }
+
+    #[test]
+    fn test_csv_import_rejects_too_many_records() {
+        let export = sample_goals_export(MAX_MIGRATION_RECORDS + 1);
+        let mut csv =
+            String::from("id,owner,name,target_amount,current_amount,target_date,locked\n");
+        for goal in export.goals {
+            csv.push_str(&format!(
+                "{},{},{},{},{},{},{}\n",
+                goal.id,
+                goal.owner,
+                goal.name,
+                goal.target_amount,
+                goal.current_amount,
+                goal.target_date,
+                goal.locked
+            ));
+        }
+
+        assert!(matches!(
+            import_goals_from_csv(csv.as_bytes()),
+            Err(MigrationError::TooManyRecords {
+                count,
+                max: MAX_MIGRATION_RECORDS,
+            }) if count == MAX_MIGRATION_RECORDS + 1
+        ));
+    }
+
+    #[test]
+    fn test_encrypted_payload_roundtrip_at_size_limit_succeeds() {
+        let plain = vec![42u8; MAX_MIGRATION_PAYLOAD_BYTES];
+        let encoded = export_to_encrypted_payload(&plain).unwrap();
+
+        assert_eq!(encoded.len(), MAX_ENCRYPTED_PAYLOAD_BYTES);
+        assert_eq!(import_from_encrypted_payload(&encoded).unwrap(), plain);
+    }
+
+    #[test]
+    fn test_import_from_encrypted_payload_rejects_oversized_input() {
+        let oversized = "A".repeat(MAX_ENCRYPTED_PAYLOAD_BYTES + 1);
+
+        assert_eq!(
+            import_from_encrypted_payload(&oversized),
+            Err(MigrationError::PayloadTooLarge {
+                size: MAX_ENCRYPTED_PAYLOAD_BYTES + 1,
+                max: MAX_ENCRYPTED_PAYLOAD_BYTES,
+            })
+        );
+    }
+
+    #[test]
+    fn test_generic_payload_checksum_is_stable_across_map_order() {
+        let mut first = HashMap::new();
+        first.insert("b".into(), serde_json::json!(2));
+        first.insert("a".into(), serde_json::json!(1));
+
+        let mut second = HashMap::new();
+        second.insert("a".into(), serde_json::json!(1));
+        second.insert("b".into(), serde_json::json!(2));
+
+        let first_snapshot =
+            ExportSnapshot::new(SnapshotPayload::Generic(first), ExportFormat::Json);
+        let second_snapshot =
+            ExportSnapshot::new(SnapshotPayload::Generic(second), ExportFormat::Json);
+
+        assert_eq!(
+            first_snapshot.compute_checksum(),
+            second_snapshot.compute_checksum()
+        );
     }
 }
