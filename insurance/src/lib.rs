@@ -1029,7 +1029,7 @@ impl Insurance {
             (policy_id, caller, policy_external_ref),
         );
 
-        true
+        Ok(true)
     }
 
     /// Set or clear an external reference ID for a policy
@@ -1074,11 +1074,9 @@ impl Insurance {
         env.events().publish(
             (symbol_short!("insure"), InsuranceEvent::ExternalRefUpdated),
             (policy_id, caller, external_ref),
-            (symbol_short!("insuranc"), InsuranceEvent::PolicyDeactivated),
-            (policy_id, caller),
         );
 
-        Ok(true)
+        true
     }
 
     /// Extend the TTL of instance storage
