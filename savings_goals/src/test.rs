@@ -13,7 +13,7 @@ use testutils::{set_ledger_time, setup_test_env};
 
 #[test]
 fn test_create_goal_unique_ids_succeeds() {
-    setup_test_env!(env, SavingsGoalContract, client, user);
+    setup_test_env!(env, SavingsGoalContract, SavingsGoalContractClient, client, user);
     client.init();
 
     let name1 = String::from_str(&env, "Goal 1");
@@ -502,7 +502,7 @@ fn test_exact_goal_completion() {
 
 #[test]
 fn test_set_time_lock_succeeds() {
-    setup_test_env!(env, SavingsGoalContract, client, owner);
+    setup_test_env!(env, SavingsGoalContract, SavingsGoalContractClient, client, owner);
     client.init();
     set_ledger_time(&env, 1, 1000);
 

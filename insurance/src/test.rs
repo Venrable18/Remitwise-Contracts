@@ -14,7 +14,7 @@ use testutils::{set_ledger_time, setup_test_env};
 
 #[test]
 fn test_create_policy_succeeds() {
-    setup_test_env!(env, Insurance, client, owner);
+    setup_test_env!(env, Insurance, InsuranceClient, client, owner);
 
     let name = String::from_str(&env, "Health Policy");
     let coverage_type = CoverageType::Health;
@@ -538,7 +538,7 @@ fn test_multiple_premium_payments() {
 
 #[test]
 fn test_create_premium_schedule_succeeds() {
-    setup_test_env!(env, Insurance, client, owner);
+    setup_test_env!(env, Insurance, InsuranceClient, client, owner);
     set_ledger_time(&env, 1000);
 
     let policy_id = client.create_policy(

@@ -144,6 +144,11 @@ flowchart TD
     G --> H["Update EM_LAST and emit events"]
 ```
 
+*Anti-Abuse Protections:*
+- **Replay Protection**: Identical emergency transfer proposals (same token, recipient, and amount) by the same proposer are rejected if one is already pending.
+- **Frequency/Burst Protection**: A single proposer is limited to a maximum of 1 active pending emergency transfer proposal at a time to prevent storage bloat and spam.
+- **Role Misuse**: Only active Family Members (excluding Viewers) can propose emergency transfers.
+
 ## Example Scenarios
 
 ### Scenario A: Small household transfer

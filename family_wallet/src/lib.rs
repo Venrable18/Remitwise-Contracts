@@ -737,6 +737,28 @@ impl FamilyWallet {
             return Self::execute_emergency_transfer_now(env, proposer, token, recipient, amount);
         }
 
+        let pending_txs: Map<u64, PendingTransaction> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("PEND_TXS"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let mut active_proposals = 0;
+        for (_, tx) in pending_txs.iter() {
+            if tx.proposer == proposer && tx.tx_type == TransactionType::EmergencyTransfer {
+                if let TransactionData::EmergencyTransfer(t, r, a) = &tx.data {
+                    if t == &token && r == &recipient && *a == amount {
+                        panic!("Identical emergency transfer proposal already pending");
+                    }
+                }
+                active_proposals += 1;
+            }
+        }
+
+        if active_proposals >= 1 {
+            panic!("Maximum pending emergency proposals reached");
+        }
+
         Self::propose_transaction(
             env,
             proposer,

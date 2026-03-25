@@ -237,6 +237,24 @@ fn test_calculate_complex_rounding() {
     assert_eq!(amounts.get(3).unwrap(), 410);
 }
 
+#[test]
+fn test_create_remittance_schedule_succeeds() {
+    setup_test_env!(env, RemittanceSplit, RemittanceSplitClient, client, owner);
+    set_ledger_time(&env, 1000);
+
+    client.initialize_split(&owner, &0, &50, &30, &15, &5);
+
+    let schedule_id = client.create_remittance_schedule(&owner, &10000, &3000, &86400);
+    assert_eq!(schedule_id, 1);
+
+    let schedule = client.get_remittance_schedule(&schedule_id);
+    assert!(schedule.is_some());
+    let schedule = schedule.unwrap();
+    assert_eq!(schedule.amount, 10000);
+    assert_eq!(schedule.next_due, 3000);
+    assert_eq!(schedule.interval, 86400);
+    assert!(schedule.active);
+}
 // ---------------------------------------------------------------------------
 // distribute_usdc — happy path
 // ---------------------------------------------------------------------------

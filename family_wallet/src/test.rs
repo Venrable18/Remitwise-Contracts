@@ -9,7 +9,7 @@ use testutils::{set_ledger_time, setup_test_env};
 
 #[test]
 fn test_initialize_wallet_succeeds() {
-    setup_test_env!(env, FamilyWallet, client, owner);
+    setup_test_env!(env, FamilyWallet, FamilyWalletClient, client, owner);
 
     let member1 = Address::generate(&env);
     let member2 = Address::generate(&env);
@@ -996,4 +996,59 @@ fn test_archive_ttl_extended_on_archive_transactions() {
         "Instance TTL ({}) must be >= INSTANCE_BUMP_AMOUNT (518,400) after archiving",
         ttl
     );
+}
+
+#[test]
+#[should_panic(expected = "Identical emergency transfer proposal already pending")]
+fn test_emergency_proposal_replay_prevention() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let member1 = Address::generate(&env);
+    client.init(&owner, &vec![&env, member1.clone()]);
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let recipient = Address::generate(&env);
+    
+    client.propose_emergency_transfer(&member1, &token_contract.address(), &recipient, &1000_0000000);
+    client.propose_emergency_transfer(&member1, &token_contract.address(), &recipient, &1000_0000000);
+}
+
+#[test]
+#[should_panic(expected = "Maximum pending emergency proposals reached")]
+fn test_emergency_proposal_frequency_burst() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let member1 = Address::generate(&env);
+    client.init(&owner, &vec![&env, member1.clone()]);
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let recipient1 = Address::generate(&env);
+    let recipient2 = Address::generate(&env);
+    
+    client.propose_emergency_transfer(&member1, &token_contract.address(), &recipient1, &1000_0000000);
+    client.propose_emergency_transfer(&member1, &token_contract.address(), &recipient2, &500_0000000);
+}
+
+#[test]
+#[should_panic(expected = "Insufficient role")]
+fn test_emergency_proposal_role_misuse() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let viewer = Address::generate(&env);
+    client.init(&owner, &vec![&env]);
+    client.add_family_member(&owner, &viewer, &FamilyRole::Viewer);
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let recipient = Address::generate(&env);
+    
+    client.propose_emergency_transfer(&viewer, &token_contract.address(), &recipient, &1000_0000000);
 }
