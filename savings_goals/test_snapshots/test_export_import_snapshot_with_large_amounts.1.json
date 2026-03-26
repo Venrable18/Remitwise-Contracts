@@ -345,7 +345,7 @@
                     },
                     {
                       "key": {
-                        "symbol": "version"
+                        "symbol": "schema_version"
                       },
                       "val": {
                         "u32": 1
@@ -1655,6 +1655,29 @@
       "event": {
         "ext": "v0",
         "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
+        "type_": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "goals"
+              },
+              {
+                "symbol": "snap_exp"
+              }
+            ],
+            "data": {
+              "u32": 1
+            }
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
         "type_": "diagnostic",
         "body": {
           "v0": {
@@ -1855,7 +1878,7 @@
                 },
                 {
                   "key": {
-                    "symbol": "version"
+                    "symbol": "schema_version"
                   },
                   "val": {
                     "u32": 1
@@ -2083,7 +2106,7 @@
                     },
                     {
                       "key": {
-                        "symbol": "version"
+                        "symbol": "schema_version"
                       },
                       "val": {
                         "u32": 1

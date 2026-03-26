@@ -1091,7 +1091,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "contract call failed"
+                  "string": "contract try_call failed"
                 },
                 {
                   "symbol": "withdraw_from_goal"

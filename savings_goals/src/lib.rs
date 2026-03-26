@@ -89,6 +89,7 @@ pub struct SavingsSchedule {
 
 #[contracttype]
 #[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SavingsGoalsError {
     InvalidAmount = 1,
     GoalNotFound = 2,
@@ -157,10 +158,19 @@ pub enum SavingsEvent {
     ScheduleCancelled,
 }
 
+/// Snapshot for savings goals export/import (migration).
+///
+/// # Schema Version Tag
+/// `schema_version` carries the explicit snapshot format version.
+/// Importers **must** validate this field against the supported range
+/// (`MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION`) before applying the
+/// snapshot. Snapshots with an unknown future version must be rejected.
 #[contracttype]
 #[derive(Clone)]
 pub struct GoalsExportSnapshot {
-    pub version: u32,
+    /// Explicit schema version tag for this snapshot format.
+    /// Supported range: MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION.
+    pub schema_version: u32,
     pub checksum: u64,
     pub next_id: u32,
     pub goals: Vec<SavingsGoal>,
@@ -175,7 +185,10 @@ pub struct AuditEntry {
     pub success: bool,
 }
 
-const SNAPSHOT_VERSION: u32 = 1;
+/// Current snapshot schema version. Bump this when GoalsExportSnapshot format changes.
+const SCHEMA_VERSION: u32 = 1;
+/// Oldest snapshot schema version this contract can import. Enables backward compat.
+const MIN_SUPPORTED_SCHEMA_VERSION: u32 = 1;
 const MAX_AUDIT_ENTRIES: u32 = 100;
 const CONTRACT_VERSION: u32 = 1;
 const MAX_BATCH_SIZE: u32 = 50;
@@ -205,6 +218,11 @@ pub enum SavingsGoalError {
     GoalLocked = 3,
     Unauthorized = 4,
     TargetAmountMustBePositive = 5,
+    /// Snapshot schema_version is outside the supported range
+    /// (MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION).
+    UnsupportedVersion = 6,
+    /// Snapshot checksum does not match the recomputed digest.
+    ChecksumMismatch = 7,
 }
 #[contract]
 pub struct SavingsGoalContract;
@@ -296,7 +314,7 @@ impl SavingsGoalContract {
 
     pub fn pause(env: Env, caller: Address) {
         caller.require_auth();
-        let admin = Self::get_pause_admin(&env).ok_or(SavingsGoalsError::Unauthorized).unwrap();
+        let admin = Self::get_pause_admin(&env).unwrap();
         if admin != caller {
             panic!("Unauthorized");
         }
@@ -309,7 +327,7 @@ impl SavingsGoalContract {
 
     pub fn unpause(env: Env, caller: Address) {
         caller.require_auth();
-        let admin = Self::get_pause_admin(&env).ok_or(SavingsGoalsError::Unauthorized).unwrap();
+        let admin = Self::get_pause_admin(&env).unwrap();
         if admin != caller {
             panic!("Unauthorized");
         }
@@ -329,7 +347,7 @@ impl SavingsGoalContract {
 
     pub fn pause_function(env: Env, caller: Address, func: Symbol) {
         caller.require_auth();
-        let admin = Self::get_pause_admin(&env).ok_or(SavingsGoalsError::Unauthorized).unwrap();
+        let admin = Self::get_pause_admin(&env).unwrap();
         if admin != caller {
             panic!("Unauthorized");
         }
@@ -346,7 +364,7 @@ impl SavingsGoalContract {
 
     pub fn unpause_function(env: Env, caller: Address, func: Symbol) {
         caller.require_auth();
-        let admin = Self::get_pause_admin(&env).ok_or(SavingsGoalsError::Unauthorized).unwrap();
+        let admin = Self::get_pause_admin(&env).unwrap();
         if admin != caller {
             panic!("Unauthorized");
         }
@@ -376,21 +394,60 @@ impl SavingsGoalContract {
         env.storage().instance().get(&symbol_short!("UPG_ADM"))
     }
 
+    /// Set or transfer the upgrade admin role.
+    /// 
+    /// # Security Requirements
+    /// - If no upgrade admin exists, caller must equal new_admin (bootstrap pattern)
+    /// - If upgrade admin exists, only current upgrade admin can transfer
+    /// - Caller must be authenticated via require_auth()
+    /// 
+    /// # Parameters
+    /// - `caller`: The address attempting to set the upgrade admin
+    /// - `new_admin`: The address to become the new upgrade admin
+    /// 
+    /// # Panics
+    /// - If caller is unauthorized for the operation
     pub fn set_upgrade_admin(env: Env, caller: Address, new_admin: Address) {
         caller.require_auth();
-        let current = Self::get_upgrade_admin(&env);
-        match current {
+        
+        let current_upgrade_admin = Self::get_upgrade_admin(&env);
+        
+        // Authorization logic:
+        // 1. If no upgrade admin exists, caller must equal new_admin (bootstrap)
+        // 2. If upgrade admin exists, only current upgrade admin can transfer
+        match current_upgrade_admin {
             None => {
+                // Bootstrap pattern - caller must be setting themselves as admin
                 if caller != new_admin {
-                    panic!("Unauthorized");
+                    panic!("Unauthorized: bootstrap requires caller == new_admin");
                 }
             }
-            Some(adm) if adm != caller => panic!("Unauthorized"),
-            _ => {}
+            Some(current_admin) => {
+                // Admin transfer - only current admin can transfer
+                if current_admin != caller {
+                    panic!("Unauthorized: only current upgrade admin can transfer");
+                }
+            }
         }
+        
         env.storage()
             .instance()
             .set(&symbol_short!("UPG_ADM"), &new_admin);
+        
+        // Emit admin transfer event for audit trail
+        env.events().publish(
+            (symbol_short!("savings"), symbol_short!("adm_xfr")),
+            (current_upgrade_admin, new_admin.clone()),
+        );
+    }
+
+    /// Get the current upgrade admin address.
+    /// 
+    /// # Returns
+    /// - `Some(Address)` if upgrade admin is set
+    /// - `None` if no upgrade admin has been configured
+    pub fn get_upgrade_admin_public(env: Env) -> Option<Address> {
+        Self::get_upgrade_admin(&env)
     }
 
     pub fn set_version(env: Env, caller: Address, new_version: u32) {
@@ -530,6 +587,10 @@ impl SavingsGoalContract {
     ///   supports backfill or migration use cases where historical goals are
     ///   recorded after the fact. Callers that need strictly future-dated
     ///   goals should validate this before invoking the contract.
+    ///
+    /// # Events
+    /// - Emits `GOAL_CREATED` with goal details.
+    /// - Emits `SavingsEvent::GoalCreated`.
     pub fn create_goal(
         env: Env,
         owner: Address,
@@ -808,6 +869,29 @@ impl SavingsGoalContract {
     ///
     /// # Panics
     /// * If `caller` does not authorize the transaction
+    /// Withdraws funds from an existing savings goal.
+    ///
+    /// # Arguments
+    /// * `caller` - Address of the goal owner (must authorize)
+    /// * `goal_id` - ID of the goal to withdraw from
+    /// * `amount` - Amount to withdraw in stroops (must be > 0)
+    ///
+    /// # Returns
+    /// `Ok(remaining_amount)` - The remaining amount in the goal after withdrawal
+    ///
+    /// # Errors
+    /// * `InvalidAmount` - If amount ≤ 0
+    /// * `GoalNotFound` - If goal_id does not exist
+    /// * `Unauthorized` - If caller is not the goal owner
+    /// * `InsufficientBalance` - If amount > current_amount
+    /// * `GoalLocked` - If the goal is locked or time-lock has not expired
+    ///
+    /// # Time-lock Behavior
+    /// - If `unlock_date` is set, withdrawal will fail if `env.ledger().timestamp() < unlock_date`.
+    /// - Boundary condition: Success if `timestamp == unlock_date`.
+    ///
+    /// # Events
+    /// - Emits `SavingsEvent::FundsWithdrawn`.
     pub fn withdraw_from_goal(
         env: Env,
         caller: Address,
@@ -881,6 +965,14 @@ impl SavingsGoalContract {
         Ok(new_amount)
     }
 
+    /// Locks a goal to prevent manual withdrawals.
+    ///
+    /// # Arguments
+    /// * `caller` - Address of the goal owner
+    /// * `goal_id` - ID of the goal
+    ///
+    /// # Events
+    /// - Emits `SavingsEvent::GoalLocked`.
     pub fn lock_goal(env: Env, caller: Address, goal_id: u32) -> bool {
         caller.require_auth();
         Self::require_not_paused(&env, pause_functions::LOCK);
@@ -920,6 +1012,14 @@ impl SavingsGoalContract {
         true
     }
 
+    /// Unlocks a goal for manual withdrawals.
+    ///
+    /// # Arguments
+    /// * `caller` - Address of the goal owner
+    /// * `goal_id` - ID of the goal
+    ///
+    /// # Events
+    /// - Emits `SavingsEvent::GoalUnlocked`.
     pub fn unlock_goal(env: Env, caller: Address, goal_id: u32) -> bool {
         caller.require_auth();
         Self::require_not_paused(&env, pause_functions::UNLOCK);
@@ -972,12 +1072,16 @@ impl SavingsGoalContract {
     // PAGINATED LIST QUERIES
     // -----------------------------------------------------------------------
 
-    /// Get a page of savings goals for `owner`.
+    /// @notice Returns a deterministic page of goals for one owner.
+    /// @dev Paging order is anchored to the owner-goal ID index (append-only,
+    ///      ascending by creation ID), not map iteration order.
+    /// @dev `cursor` is exclusive and must match an existing goal ID in the
+    ///      owner's index when non-zero; invalid cursors are rejected.
     ///
     /// # Arguments
-    /// * `owner`  – whose goals to return
-    /// * `cursor` – start after this goal ID (pass 0 for the first page)
-    /// * `limit`  – max items per page (0 → DEFAULT_PAGE_LIMIT, capped at MAX_PAGE_LIMIT)
+    /// * `owner`  - whose goals to return
+    /// * `cursor` - start after this goal ID (pass 0 for the first page)
+    /// * `limit`  - max items per page (0 -> DEFAULT_PAGE_LIMIT, capped at MAX_PAGE_LIMIT)
     ///
     /// # Returns
     /// `GoalPage { items, next_cursor, count }`.
@@ -990,35 +1094,66 @@ impl SavingsGoalContract {
             .get(&symbol_short!("GOALS"))
             .unwrap_or_else(|| Map::new(&env));
 
+        let owner_goal_ids: Map<Address, Vec<u32>> = env
+            .storage()
+            .instance()
+            .get(&Self::STORAGE_OWNER_GOAL_IDS)
+            .unwrap_or_else(|| Map::new(&env));
+        let ids = owner_goal_ids
+            .get(owner.clone())
+            .unwrap_or_else(|| Vec::new(&env));
+
+        if ids.is_empty() {
+            return GoalPage {
+                items: Vec::new(&env),
+                next_cursor: 0,
+                count: 0,
+            };
+        }
+
+        let mut start_index: u32 = 0;
+        if cursor != 0 {
+            let mut found = false;
+            for i in 0..ids.len() {
+                if ids.get(i) == Some(cursor) {
+                    start_index = i + 1;
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                panic!("Invalid cursor");
+            }
+        }
+
+        let mut end_index = start_index + limit;
+        if end_index > ids.len() {
+            end_index = ids.len();
+        }
+
         let mut result = Vec::new(&env);
-        let mut next_cursor: u32 = 0;
-        let mut collected: u32 = 0;
-
-        for (id, goal) in goals.iter() {
-            if id <= cursor {
-                continue;
-            }
+        for i in start_index..end_index {
+            let goal_id = ids.get(i).unwrap_or_else(|| panic!("Pagination index out of sync"));
+            let goal = goals
+                .get(goal_id)
+                .unwrap_or_else(|| panic!("Pagination index out of sync"));
             if goal.owner != owner {
-                continue;
+                panic!("Pagination index owner mismatch");
             }
-            if collected < limit {
-                result.push_back(goal);
-                collected += 1;
-                next_cursor = id; // track last returned ID
-            } else {
-                break;
-            }
+            result.push_back(goal);
         }
 
-        // If we didn't fill the page, there are no more items
-        if collected < limit {
-            next_cursor = 0;
-        }
+        let next_cursor = if end_index < ids.len() {
+            ids.get(end_index - 1)
+                .unwrap_or_else(|| panic!("Pagination index out of sync"))
+        } else {
+            0
+        };
 
         GoalPage {
             items: result,
             next_cursor,
-            count: collected,
+            count: end_index - start_index,
         }
     }
 
@@ -1082,9 +1217,13 @@ impl SavingsGoalContract {
                 list.push_back(g);
             }
         }
-        let checksum = Self::compute_goals_checksum(SNAPSHOT_VERSION, next_id, &list);
+        let checksum = Self::compute_goals_checksum(SCHEMA_VERSION, next_id, &list);
+        env.events().publish(
+            (symbol_short!("goals"), symbol_short!("snap_exp")),
+            SCHEMA_VERSION,
+        );
         GoalsExportSnapshot {
-            version: SNAPSHOT_VERSION,
+            schema_version: SCHEMA_VERSION,
             checksum,
             next_id,
             goals: list,
@@ -1096,19 +1235,25 @@ impl SavingsGoalContract {
         caller: Address,
         nonce: u64,
         snapshot: GoalsExportSnapshot,
-    ) -> bool {
+    ) -> Result<bool, SavingsGoalError> {
         caller.require_auth();
         Self::require_nonce(&env, &caller, nonce);
 
-        if snapshot.version != SNAPSHOT_VERSION {
+        // Accept any schema_version within the supported range for backward/forward compat.
+        if snapshot.schema_version < MIN_SUPPORTED_SCHEMA_VERSION
+            || snapshot.schema_version > SCHEMA_VERSION
+        {
             Self::append_audit(&env, symbol_short!("import"), &caller, false);
-            panic!("Unsupported snapshot version");
+            return Err(SavingsGoalError::UnsupportedVersion);
         }
-        let expected =
-            Self::compute_goals_checksum(snapshot.version, snapshot.next_id, &snapshot.goals);
+        let expected = Self::compute_goals_checksum(
+            snapshot.schema_version,
+            snapshot.next_id,
+            &snapshot.goals,
+        );
         if snapshot.checksum != expected {
             Self::append_audit(&env, symbol_short!("import"), &caller, false);
-            panic!("Snapshot checksum mismatch");
+            return Err(SavingsGoalError::ChecksumMismatch);
         }
 
         Self::extend_instance_ttl(&env);
@@ -1134,7 +1279,7 @@ impl SavingsGoalContract {
 
         Self::increment_nonce(&env, &caller);
         Self::append_audit(&env, symbol_short!("import"), &caller, true);
-        true
+        Ok(true)
     }
 
     pub fn get_audit_log(env: Env, from_index: u32, limit: u32) -> Vec<AuditEntry> {
@@ -1246,6 +1391,15 @@ impl SavingsGoalContract {
     }
 
     /// Set time-lock on a goal
+    /// Sets a time-lock on a savings goal.
+    ///
+    /// # Arguments
+    /// * `caller` - Address of the goal owner
+    /// * `goal_id` - ID of the goal
+    /// * `unlock_date` - Unix timestamp when the goal becomes withdrawable
+    ///
+    /// # Panics
+    /// - If caller is not the owner or goal not found.
     pub fn set_time_lock(env: Env, caller: Address, goal_id: u32, unlock_date: u64) -> bool {
         caller.require_auth();
         Self::extend_instance_ttl(&env);
@@ -1285,6 +1439,17 @@ impl SavingsGoalContract {
         true
     }
 
+    /// Creates a recurring savings schedule.
+    ///
+    /// # Arguments
+    /// * `owner` - Address of the schedule owner
+    /// * `goal_id` - ID of the goal to fund
+    /// * `amount` - Amount to save in each interval
+    /// * `next_due` - First execution timestamp
+    /// * `interval` - Seconds between executions
+    ///
+    /// # Returns
+    /// - ID of the new schedule
     pub fn create_savings_schedule(
         env: Env,
         owner: Address,
@@ -1447,6 +1612,26 @@ impl SavingsGoalContract {
         true
     }
 
+    /// Executes all active and due savings schedules.
+    ///
+    /// # Drift Handling
+    /// - If execution is delayed, the schedule will "catch up" by skipping missed intervals
+    ///   and incrementing `missed_count`.
+    /// - `next_due` is set to the next future interval anchor.
+    ///
+    /// # Events
+    /// - Emits `SavingsEvent::ScheduleExecuted` for each successful execution.
+    /// - Emits `SavingsEvent::ScheduleMissed` for each interval missed.
+    /// Executes all active and due savings schedules.
+    ///
+    /// # Drift Handling
+    /// - If execution is delayed, the schedule will "catch up" by skipping missed intervals
+    ///   and incrementing `missed_count`.
+    /// - `next_due` is set to the next future interval anchor.
+    ///
+    /// # Events
+    /// - Emits `SavingsEvent::ScheduleExecuted` for each successful execution.
+    /// - Emits `SavingsEvent::ScheduleMissed` for each interval missed.
     pub fn execute_due_savings_schedules(env: Env) -> Vec<u32> {
         Self::extend_instance_ttl(&env);
 
