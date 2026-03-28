@@ -3,7 +3,7 @@
 
 use remitwise_common::{
     clamp_limit, EventCategory, EventPriority, RemitwiseEvents, ARCHIVE_BUMP_AMOUNT,
-    ARCHIVE_LIFETIME_THRESHOLD, CONTRACT_VERSION, DEFAULT_PAGE_LIMIT, INSTANCE_BUMP_AMOUNT,
+    ARCHIVE_LIFETIME_THRESHOLD, CONTRACT_VERSION, INSTANCE_BUMP_AMOUNT,
     INSTANCE_LIFETIME_THRESHOLD, MAX_BATCH_SIZE, MAX_PAGE_LIMIT,
 };
 
@@ -2468,6 +2468,10 @@ mod test {
             let client = BillPaymentsClient::new(&env, &cid);
             let owner = Address::generate(&env);
 
+            // Set initial ledger time to 0 to bypass "due_date >= now" check,
+            // then fast-forward to the target 'now' value.
+            env.ledger().set_timestamp(0);
+
             // Create bills with due_date < now (overdue)
             for i in 0..n_overdue {
                 client.create_bill(
@@ -2495,6 +2499,9 @@ mod test {
                     &String::from_str(&env, "XLM"),
                 );
             }
+
+            // Fast-forward to 'now' so they become overdue
+            env.ledger().set_timestamp(now);
 
             let page = client.get_overdue_bills(&0, &50);
             for bill in page.items.iter() {
@@ -2547,27 +2554,34 @@ mod test {
         #[test]
         fn prop_recurring_next_bill_due_date_follows_original(
             base_due in 1_000_000u64..5_000_000u64,
+            base_due_offset in 1_000_000u64..5_000_000u64,
             pay_offset in 1u64..100_000u64,
             freq_days in 1u32..366u32,
         ) {
             let env = make_env();
-            let pay_time = base_due + pay_offset;
-            env.ledger().set_timestamp(pay_time);
             env.mock_all_auths();
             let cid = env.register_contract(None, BillPayments);
             let client = BillPaymentsClient::new(&env, &cid);
             let owner = Address::generate(&env);
 
+            // Set base due date far in the future relative to 0
+            let base_due = 1_000_000 + base_due_offset;
+            env.ledger().set_timestamp(0);
+
             let bill_id = client.create_bill(
                 &owner,
                 &String::from_str(&env, "Recurring"),
-                &200,
+                &100,
                 &base_due,
                 &true,
                 &freq_days,
                 &None,
                 &String::from_str(&env, "XLM"),
             );
+
+            // Fast-forward to the payment time
+            let now = base_due + pay_offset;
+            env.ledger().set_timestamp(now);
 
             client.pay_bill(&owner, &bill_id);
 
@@ -2866,7 +2880,7 @@ mod test {
 
         // Use mock_auths specifically for creation so it doesn't affect the pay_bill call
         env.mock_all_auths();
-        let bill_id = client.create_bill(
+        let _bill_id = client.create_bill(
             &owner,
             &String::from_str(&env, "Water"),
             &500,
@@ -2877,10 +2891,11 @@ mod test {
             &String::from_str(&env, "XLM"),
         );
 
-        // Create a new env/contract instance to ensure no mock_all_auth state persists
-        // Actually, in many Soroban versions, mock_all_auths is persistent for the entire Env.
-        // We can just use an empty MockAuth list if needed, or a fresh Env if we can snapshot.
-        // But easier is to just not use mock_all_auths for the first call either.
+        // This will panic as expected because we are NOT mocking auths for this call
+        // and 'owner.require_auth()' will fail.
+        // We set mock_all_auths to false to disable the global mock.
+        env.set_auths(&[]); 
+        client.pay_bill(&owner, &_bill_id);
     }
 
     #[test]

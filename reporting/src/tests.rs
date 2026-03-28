@@ -1309,7 +1309,7 @@ fn test_archive_ttl_extended_on_archive_reports() {
 // of call order, ledger timestamp, or user address.
 // ============================================================================
 
-fn make_client(env: &Env) -> (ReportingContractClient, Address) {
+fn make_client(env: &Env) -> (ReportingContractClient<'_>, Address) {
     let contract_id = env.register_contract(None, ReportingContract);
     let client = ReportingContractClient::new(env, &contract_id);
     let admin = Address::generate(env);
@@ -1719,7 +1719,7 @@ fn test_unauthorized_access_fails() {
     let client = ReportingContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let attacker = Address::generate(&env);
+    let _attacker = Address::generate(&env);
 
     // Setup with admin auth
     env.mock_all_auths();
