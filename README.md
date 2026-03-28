@@ -35,6 +35,28 @@ A common crate containing shared types, enums, and constants used across multipl
 - `clamp_limit()`: Helper for pagination limit validation
 - `RemitwiseEvents`: Standardized event emission with `emit()` and `emit_batch()` methods
 
+## Shared Enums & Constants Stability Coverage
+
+This project now includes dedicated compatibility guards in `remitwise-common` to prevent breaking changes across dependent contracts.
+
+- invariant tests for enum discriminants and event tags
+- ordering assumptions verified for role and coverage definitions
+- round-trip serialization via `soroban_sdk::IntoVal`/`TryFromVal`
+- event topic and payload serialization checks for `RemitwiseEvents`
+- pagination and TTL constant stability assertions
+
+### Running the new coverage
+
+```bash
+cargo test -p remitwise-common
+```
+
+### Security notes
+
+- Enums are `#[repr(u32)]` and are asserted in tests, reducing risk of contract integration drift
+- Shared constants used for pagination, batch size, storage TTL, and signature timeout are locked with stability checks
+- `clamp_limit()` now has explicit tests for overflow, underflow, and boundary conditions
+
 ## CLI Tool
 
 A custom Rust CLI is provided for interacting with the contracts without a UI.
@@ -434,6 +456,35 @@ Run tests for all contracts:
 cargo test
 ```
 
+### Encrypted migration payload decode safety
+
+The `data_migration` crate supports an **opaque encrypted payload** transport format for off-chain migration tooling.
+
+**Format contract**
+
+- `enc:v1:<base64>`
+
+Where:
+
+- `enc:v1:` is a strict marker prefix.
+- `<base64>` is the base64-encoded ciphertext blob.
+
+**Security assumptions and notes**
+
+- `data_migration` does **not** perform cryptographic encryption/decryption; it only transports bytes.
+- The marker prefix prevents accidental decoding of non-encrypted migration strings as ciphertext.
+- Import is strict and must **fail closed** (return an error) for:
+  - missing/incorrect marker
+  - unsupported marker version
+  - empty ciphertext
+  - invalid/truncated base64
+
+Run tests for this crate:
+
+```bash
+cargo test -p data_migration
+```
+
 Run tests for a specific contract:
 
 ```bash
@@ -477,6 +528,28 @@ See [scripts/README_INVARIANT_TESTS.md](scripts/README_INVARIANT_TESTS.md) for d
 - `cargo test -p remittance_split` exercises the USDC distribution logic with a mocked Stellar Asset Contract (`env.register_stellar_asset_contract_v2`) and built-in auth mocking.
 - The suite covers minting the payer account, splitting across spending/savings/bills/insurance, and asserting balances along with the new allocation metadata helper.
 - The same command is intended for CI so it runs without manual setup; re-run locally whenever split logic changes or new USDC paths are added.
+
+### Orchestrator audit log pagination correctness
+
+The orchestrator audit API (`get_audit_log(from_index, limit)`) supports cursor-based pagination for compliance and monitoring clients.
+
+**Pagination guarantees:**
+- Results are ordered from oldest to newest in the current bounded audit window.
+- `from_index` is a stable zero-based cursor within that bounded window.
+- `limit` is clamped to contract maximum capacity (`MAX_AUDIT_ENTRIES`) for predictable gas and memory usage.
+- Page-end calculation uses saturating arithmetic to prevent cursor overflow edge cases.
+- Out-of-range cursors return an empty page (safe default).
+
+**Security assumptions and notes:**
+- Consumers should treat the cursor as a position in the current rotated window, not an immutable global ID.
+- Log rotation drops oldest records at capacity, so clients should read promptly and persist externally if long-term retention is required.
+- Tests assert no duplicate entries across sequential pages under heavy execution history and rotation pressure.
+
+Run orchestrator tests (including pagination correctness coverage):
+
+```bash
+cargo test -p orchestrator
+```
 
 ## Gas Benchmarks
 

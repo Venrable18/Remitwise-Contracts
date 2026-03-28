@@ -5,11 +5,15 @@ use soroban_sdk::{
     token::{StellarAssetClient, TokenClient},
     vec, Env,
 };
-use testutils::{set_ledger_time, setup_test_env};
+use testutils::set_ledger_time;
 
 #[test]
 fn test_initialize_wallet_succeeds() {
-    setup_test_env!(env, FamilyWallet, client, owner);
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
 
     let member1 = Address::generate(&env);
     let member2 = Address::generate(&env);
@@ -352,6 +356,156 @@ fn test_propose_role_change() {
     assert_eq!(member2_data.unwrap().role, FamilyRole::Admin);
 }
 
+// ============================================================================
+// Role Expiry Lifecycle Tests
+//
+// Verify that role-expiry revokes permissions at the boundary timestamp and
+// that permissions can be restored after renewal by an authorized caller.
+// ============================================================================
+
+#[test]
+fn test_role_expiry_boundary_allows_before_expiry() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    set_ledger_time(&env, 100, 1_000);
+
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let admin = Address::generate(&env);
+
+    client.init(&owner, &vec![&env]);
+    client.add_family_member(&owner, &admin, &FamilyRole::Admin);
+
+    let expiry = 1_010u64;
+    client.set_role_expiry(&owner, &admin, &Some(expiry));
+    assert_eq!(client.get_role_expiry_public(&admin), Some(expiry));
+
+    // At `expiry - 1` the role is still active.
+    set_ledger_time(&env, 101, expiry - 1);
+    assert!(client.configure_emergency(&admin, &1000_0000000, &3600, &0, &10000_0000000));
+}
+
+#[test]
+#[should_panic(expected = "Only Owner or Admin can configure emergency settings")]
+fn test_role_expiry_boundary_revokes_at_expiry_timestamp() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    set_ledger_time(&env, 100, 1_000);
+
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let admin = Address::generate(&env);
+
+    client.init(&owner, &vec![&env]);
+    client.add_family_member(&owner, &admin, &FamilyRole::Admin);
+
+    let expiry = 1_010u64;
+    client.set_role_expiry(&owner, &admin, &Some(expiry));
+
+    // At `expiry` the role is expired (inclusive boundary).
+    set_ledger_time(&env, 101, expiry);
+    client.configure_emergency(&admin, &1000_0000000, &3600, &0, &10000_0000000);
+}
+
+#[test]
+fn test_role_expiry_renewal_restores_permissions() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    set_ledger_time(&env, 100, 1_000);
+
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let admin = Address::generate(&env);
+
+    client.init(&owner, &vec![&env]);
+    client.add_family_member(&owner, &admin, &FamilyRole::Admin);
+
+    let expiry = 1_010u64;
+    client.set_role_expiry(&owner, &admin, &Some(expiry));
+
+    // Expired at the boundary...
+    set_ledger_time(&env, 101, expiry);
+
+    // ...then renewed by the Owner at the same timestamp.
+    let renewed_to = expiry + 100;
+    client.set_role_expiry(&owner, &admin, &Some(renewed_to));
+    assert_eq!(client.get_role_expiry_public(&admin), Some(renewed_to));
+
+    // Permissions are restored immediately after renewal.
+    assert!(client.configure_emergency(&admin, &1000_0000000, &3600, &0, &10000_0000000));
+}
+
+#[test]
+#[should_panic(expected = "Insufficient role")]
+fn test_role_expiry_unauthorized_member_cannot_renew() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    set_ledger_time(&env, 100, 1_000);
+
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let member = Address::generate(&env);
+
+    client.init(&owner, &vec![&env, member.clone()]);
+
+    // Regular members cannot set/renew role expiry.
+    client.set_role_expiry(&member, &member, &Some(2_000));
+}
+
+#[test]
+#[should_panic(expected = "Role has expired")]
+fn test_role_expiry_expired_admin_cannot_renew_self() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    set_ledger_time(&env, 100, 1_000);
+
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let admin = Address::generate(&env);
+
+    client.init(&owner, &vec![&env]);
+    client.add_family_member(&owner, &admin, &FamilyRole::Admin);
+
+    // Expire immediately at `1_000`.
+    client.set_role_expiry(&owner, &admin, &Some(1_000));
+
+    set_ledger_time(&env, 101, 1_000);
+    client.set_role_expiry(&admin, &admin, &Some(2_000));
+}
+
+#[test]
+#[should_panic(expected = "Member not found")]
+fn test_role_expiry_cannot_be_set_for_non_member() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    set_ledger_time(&env, 100, 1_000);
+
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let non_member = Address::generate(&env);
+
+    client.init(&owner, &vec![&env]);
+    client.set_role_expiry(&owner, &non_member, &Some(2_000));
+}
+
 #[test]
 fn test_propose_emergency_transfer() {
     let env = Env::default();
@@ -419,7 +573,7 @@ fn test_emergency_mode_direct_transfer_within_limits() {
     let total = 5000_0000000;
     StellarAssetClient::new(&env, &token_contract.address()).mint(&owner, &total);
 
-    client.configure_emergency(&owner, &2000_0000000, &3600u64, &1000_0000000);
+    client.configure_emergency(&owner, &2000_0000000, &3600u64, &1000_0000000, &5000_0000000);
     client.set_emergency_mode(&owner, &true);
     assert!(client.is_emergency_mode());
 
@@ -454,7 +608,7 @@ fn test_emergency_transfer_exceeds_limit() {
 
     StellarAssetClient::new(&env, &token_contract.address()).mint(&owner, &5000_0000000);
 
-    client.configure_emergency(&owner, &1000_0000000, &3600u64, &0);
+    client.configure_emergency(&owner, &1000_0000000, &3600u64, &0, &5000_0000000);
     client.set_emergency_mode(&owner, &true);
 
     let recipient = Address::generate(&env);
@@ -479,7 +633,7 @@ fn test_emergency_transfer_cooldown_enforced() {
 
     StellarAssetClient::new(&env, &token_contract.address()).mint(&owner, &5000_0000000);
 
-    client.configure_emergency(&owner, &2000_0000000, &3600u64, &0);
+    client.configure_emergency(&owner, &2000_0000000, &3600u64, &0, &5000_0000000);
     client.set_emergency_mode(&owner, &true);
 
     let recipient = Address::generate(&env);
@@ -511,7 +665,7 @@ fn test_emergency_transfer_min_balance_enforced() {
     let total = 3000_0000000;
     StellarAssetClient::new(&env, &token_contract.address()).mint(&owner, &total);
 
-    client.configure_emergency(&owner, &2000_0000000, &0u64, &2500_0000000);
+    client.configure_emergency(&owner, &2000_0000000, &0u64, &2500_0000000, &5000_0000000);
     client.set_emergency_mode(&owner, &true);
 
     let recipient = Address::generate(&env);
@@ -996,4 +1150,59 @@ fn test_archive_ttl_extended_on_archive_transactions() {
         "Instance TTL ({}) must be >= INSTANCE_BUMP_AMOUNT (518,400) after archiving",
         ttl
     );
+}
+
+#[test]
+#[should_panic(expected = "Identical emergency transfer proposal already pending")]
+fn test_emergency_proposal_replay_prevention() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let member1 = Address::generate(&env);
+    client.init(&owner, &vec![&env, member1.clone()]);
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let recipient = Address::generate(&env);
+    
+    client.propose_emergency_transfer(&member1, &token_contract.address(), &recipient, &1000_0000000);
+    client.propose_emergency_transfer(&member1, &token_contract.address(), &recipient, &1000_0000000);
+}
+
+#[test]
+#[should_panic(expected = "Maximum pending emergency proposals reached")]
+fn test_emergency_proposal_frequency_burst() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let member1 = Address::generate(&env);
+    client.init(&owner, &vec![&env, member1.clone()]);
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let recipient1 = Address::generate(&env);
+    let recipient2 = Address::generate(&env);
+    
+    client.propose_emergency_transfer(&member1, &token_contract.address(), &recipient1, &1000_0000000);
+    client.propose_emergency_transfer(&member1, &token_contract.address(), &recipient2, &500_0000000);
+}
+
+#[test]
+#[should_panic(expected = "Insufficient role")]
+fn test_emergency_proposal_role_misuse() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let viewer = Address::generate(&env);
+    client.init(&owner, &vec![&env]);
+    client.add_family_member(&owner, &viewer, &FamilyRole::Viewer);
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let recipient = Address::generate(&env);
+    
+    client.propose_emergency_transfer(&viewer, &token_contract.address(), &recipient, &1000_0000000);
 }

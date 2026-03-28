@@ -32,11 +32,32 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
-/// Current schema version for migration compatibility.
+ /// Encrypted migration payload marker prefix.
+ ///
+ /// Format: `enc:v1:<base64>`
+ const ENCRYPTED_PAYLOAD_PREFIX_V1: &str = "enc:v1:";
+
+/// Current snapshot schema version for migration compatibility.
+///
+/// # Versioning Policy (workspace-wide)
+/// All snapshot export/import flows across the workspace use an explicit
+/// `schema_version` tag stored inside the snapshot struct (or header).
+/// When the snapshot format changes in a backward-incompatible way, bump
+/// `SCHEMA_VERSION` and update `MIN_SUPPORTED_VERSION` only if the old
+/// format can no longer be safely imported.
+///
+/// Importers must validate:
+///   `MIN_SUPPORTED_VERSION <= schema_version <= SCHEMA_VERSION`
+/// and reject anything outside that range to guarantee safe
+/// forward/backward compatibility handling.
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// Minimum supported schema version for import.
+/// Snapshots with a version below this value are too old to import safely.
 pub const MIN_SUPPORTED_VERSION: u32 = 1;
+
+/// Alias used in snapshot headers to keep naming consistent with other contracts.
+pub const SNAPSHOT_SCHEMA_VERSION: u32 = SCHEMA_VERSION;
 
 /// Algorithm used to compute the snapshot checksum.
 ///
@@ -356,13 +377,24 @@ pub fn export_to_csv(payload: &SavingsGoalsExport) -> Result<Vec<u8>, MigrationE
 
 /// Encrypted format: store base64-encoded payload (caller encrypts before passing).
 pub fn export_to_encrypted_payload(plain_bytes: &[u8]) -> String {
-    base64::engine::general_purpose::STANDARD.encode(plain_bytes)
+    let b64 = base64::engine::general_purpose::STANDARD.encode(plain_bytes);
+    format!("{}{}", ENCRYPTED_PAYLOAD_PREFIX_V1, b64)
 }
 
 /// Decode encrypted payload from base64 (caller decrypts after).
 pub fn import_from_encrypted_payload(encoded: &str) -> Result<Vec<u8>, MigrationError> {
+    let rest = encoded
+        .strip_prefix(ENCRYPTED_PAYLOAD_PREFIX_V1)
+        .ok_or_else(|| MigrationError::InvalidFormat("missing or invalid encrypted payload marker".into()))?;
+
+    if rest.is_empty() {
+        return Err(MigrationError::InvalidFormat(
+            "empty encrypted payload ciphertext".into(),
+        ));
+    }
+
     base64::engine::general_purpose::STANDARD
-        .decode(encoded)
+        .decode(rest)
         .map_err(|e| MigrationError::InvalidFormat(e.to_string()))
 }
 
@@ -771,5 +803,67 @@ mod tests {
                 .to_string()
                 .contains("5")
         );
+    }
+
+    #[test]
+    fn test_encrypted_payload_roundtrip_succeeds() {
+        let plain = b"hello migration".to_vec();
+        let encoded = export_to_encrypted_payload(&plain);
+        let decoded = import_from_encrypted_payload(&encoded).unwrap();
+        assert_eq!(decoded, plain);
+    }
+
+    #[test]
+    fn test_encrypted_payload_missing_marker_fails() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"abc");
+        let err = import_from_encrypted_payload(&encoded).unwrap_err();
+        assert!(matches!(err, MigrationError::InvalidFormat(_)));
+    }
+
+    #[test]
+    fn test_encrypted_payload_unsupported_version_marker_fails() {
+        let encoded = format!(
+            "enc:v2:{}",
+            base64::engine::general_purpose::STANDARD.encode(b"abc")
+        );
+        let err = import_from_encrypted_payload(&encoded).unwrap_err();
+        assert!(matches!(err, MigrationError::InvalidFormat(_)));
+    }
+
+    #[test]
+    fn test_encrypted_payload_empty_ciphertext_fails() {
+        let err = import_from_encrypted_payload("enc:v1:").unwrap_err();
+        assert!(matches!(err, MigrationError::InvalidFormat(_)));
+    }
+
+    #[test]
+    fn test_encrypted_payload_invalid_base64_fails_extended() {
+        let err = import_from_encrypted_payload("enc:v1:!!!not-base64!!!").unwrap_err();
+        assert!(matches!(err, MigrationError::InvalidFormat(_)));
+    }
+
+    #[test]
+    fn test_encrypted_payload_truncated_base64_fails() {
+        let plain = b"abcdef".to_vec();
+        let encoded = export_to_encrypted_payload(&plain);
+        let truncated = encoded[..encoded.len().saturating_sub(1)].to_string();
+        let err = import_from_encrypted_payload(&truncated).unwrap_err();
+        assert!(matches!(err, MigrationError::InvalidFormat(_)));
+    }
+
+    #[test]
+    fn test_encrypted_payload_manipulated_ciphertext_fails() {
+        let plain = b"abcdef".to_vec();
+        let mut encoded = export_to_encrypted_payload(&plain);
+        let idx = encoded
+            .find(ENCRYPTED_PAYLOAD_PREFIX_V1)
+            .unwrap() + ENCRYPTED_PAYLOAD_PREFIX_V1.len();
+
+        let mut bytes = encoded.into_bytes();
+        bytes[idx] = b'!';
+        encoded = String::from_utf8(bytes).unwrap();
+
+        let err = import_from_encrypted_payload(&encoded).unwrap_err();
+        assert!(matches!(err, MigrationError::InvalidFormat(_)));
     }
 }
