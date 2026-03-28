@@ -1124,8 +1124,8 @@ fn test_export_snapshot_contains_correct_schema_version() {
 
     let snapshot = client.export_snapshot(&owner).unwrap();
     assert_eq!(
-        snapshot.schema_version, 1,
-        "schema_version must equal SCHEMA_VERSION (1)"
+        snapshot.schema_version, 2,
+        "schema_version must equal SCHEMA_VERSION (2)"
     );
 }
 
@@ -1140,7 +1140,7 @@ fn test_import_snapshot_current_schema_version_succeeds() {
     client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
 
     let snapshot = client.export_snapshot(&owner).unwrap();
-    assert_eq!(snapshot.schema_version, 1);
+    assert_eq!(snapshot.schema_version, 2);
 
     let ok = client.import_snapshot(&owner, &1, &snapshot);
     assert!(ok, "import with current schema version must succeed");
@@ -1179,7 +1179,7 @@ fn test_import_snapshot_too_old_schema_version_rejected() {
     client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
 
     let mut snapshot = client.export_snapshot(&owner).unwrap();
-    // Simulate a snapshot too old to import.
+    // Simulate a snapshot too old to import (schema_version 0 < MIN_SUPPORTED_SCHEMA_VERSION 2).
     snapshot.schema_version = 0;
 
     let result = client.try_import_snapshot(&owner, &1, &snapshot);
@@ -1225,7 +1225,7 @@ fn test_snapshot_export_import_roundtrip_restores_config() {
     client.update_split(&owner, &1, &40, &40, &10, &10);
 
     let snapshot = client.export_snapshot(&owner).unwrap();
-    assert_eq!(snapshot.schema_version, 1);
+    assert_eq!(snapshot.schema_version, 2);
 
     // Nonce is 2 after initialize_split followed by update_split.
     let ok = client.import_snapshot(&owner, &2, &snapshot);

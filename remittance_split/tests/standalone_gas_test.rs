@@ -60,7 +60,7 @@ fn test_create_schedule_gas_measurement() {
     let next_due = env.ledger().timestamp() + 86400; // 1 day from now
     let interval = 2_592_000u64; // 30 days
 
-    let (cpu, mem, result) = measure_gas(&env, || {
+    let (cpu, mem, schedule_id) = measure_gas(&env, || {
         client.create_remittance_schedule(&owner, &amount, &next_due, &interval)
     });
 
@@ -263,7 +263,7 @@ fn test_gas_scaling_with_multiple_schedules() {
     let next_due = env.ledger().timestamp() + 86400 * 11;
     let interval = 2_592_000u64;
 
-    let (cpu, mem, result) = measure_gas(&env, || {
+    let (cpu, mem, schedule_id) = measure_gas(&env, || {
         client.create_remittance_schedule(&owner, &amount, &next_due, &interval)
     });
 
@@ -340,7 +340,7 @@ fn test_input_validation_security() {
     let result = client.try_create_remittance_schedule(
         &owner, 
         &0i128, // Invalid: zero amount
-        &(env.ledger().timestamp() + 86400), 
+        &(env.ledger().timestamp() + 86400),
         &2_592_000u64
     );
     assert_eq!(result, Err(Ok(RemittanceSplitError::InvalidAmount)), "Zero amount should be rejected");
@@ -349,7 +349,7 @@ fn test_input_validation_security() {
     let result = client.try_create_remittance_schedule(
         &owner, 
         &(-1000i128), // Invalid: negative amount
-        &(env.ledger().timestamp() + 86400), 
+        &(env.ledger().timestamp() + 86400),
         &2_592_000u64
     );
     assert_eq!(result, Err(Ok(RemittanceSplitError::InvalidAmount)), "Negative amount should be rejected");
@@ -364,10 +364,10 @@ fn test_input_validation_security() {
     assert_eq!(result, Err(Ok(RemittanceSplitError::InvalidDueDate)), "Past due date should be rejected");
 
     // Test valid parameters work
-    let result = client.create_remittance_schedule(
-        &owner, 
-        &1000i128, 
-        &(env.ledger().timestamp() + 86400), 
+    client.create_remittance_schedule(
+        &owner,
+        &1000i128,
+        &(env.ledger().timestamp() + 86400),
         &2_592_000u64
     );
     assert!(result > 0, "Valid parameters should succeed");

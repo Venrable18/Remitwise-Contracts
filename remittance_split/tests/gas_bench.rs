@@ -88,7 +88,7 @@ fn bench_create_remittance_schedule() {
     let next_due = env.ledger().timestamp() + 86400; // 1 day from now
     let interval = 2_592_000u64; // 30 days in seconds
 
-    let (cpu, mem, result) = measure(&env, || {
+    let (cpu, mem, schedule_id) = measure(&env, || {
         client.create_remittance_schedule(&owner, &amount, &next_due, &interval)
     });
     
@@ -126,7 +126,7 @@ fn bench_create_multiple_schedules() {
     let next_due = env.ledger().timestamp() + 86400 * 11;
     let interval = 2_592_000u64;
 
-    let (cpu, mem, result) = measure(&env, || {
+    let (cpu, mem, _schedule_id) = measure(&env, || {
         client.create_remittance_schedule(&owner, &amount, &next_due, &interval)
     });
     

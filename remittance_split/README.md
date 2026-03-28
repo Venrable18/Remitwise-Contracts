@@ -158,6 +158,81 @@ Distributes USDC from `from` to the four split destination accounts.
 
 Updates split percentages. Owner-only, nonce-protected, and blocked while paused.
 
+---
+
+### Snapshot Export / Import
+
+#### `export_snapshot(env, caller) -> Option<ExportSnapshot>`
+
+Exports the current split configuration as a portable, integrity-verified snapshot.
+
+The snapshot includes a **FNV-1a checksum** computed over:
+- snapshot `version`
+- all four percentage fields
+- `config.timestamp`
+- `config.initialized` flag
+- `exported_at` (ledger timestamp at export time)
+
+**Parameters:**
+- `caller`: Address of the owner (must authorize)
+
+**Returns:** `Some(ExportSnapshot)` on success, `None` if not initialized
+
+**Events:** emits `SplitEvent::SnapshotExported`
+
+**ExportSnapshot structure:**
+```rust
+pub struct ExportSnapshot {
+    pub version: u32,      // snapshot format version (currently 2)
+    pub checksum: u64,     // FNV-1a integrity hash
+    pub config: SplitConfig,
+    pub exported_at: u64,  // ledger timestamp at export
+}
+```
+
+---
+
+#### `import_snapshot(env, caller, nonce, snapshot) -> bool`
+
+Restores a split configuration from a previously exported snapshot.
+
+**Integrity checks performed (in order):**
+
+| # | Check | Error |
+|---|-------|-------|
+| 1 | `snapshot.version` within `[MIN_SNAPSHOT_VERSION, SNAPSHOT_VERSION]` | `UnsupportedVersion` |
+| 2 | FNV-1a checksum matches recomputed value | `ChecksumMismatch` |
+| 3 | `snapshot.config.initialized == true` | `SnapshotNotInitialized` |
+| 4 | Each percentage field `<= 100` | `InvalidPercentageRange` |
+| 5 | Sum of percentages `== 100` | `InvalidPercentages` |
+| 6 | `config.timestamp` and `exported_at` not in the future | `FutureTimestamp` |
+| 7 | Caller is the current contract owner | `Unauthorized` |
+| 8 | `snapshot.config.owner == caller` | `OwnerMismatch` |
+
+**Parameters:**
+- `caller`: Address of the caller (must be current owner and snapshot owner)
+- `nonce`: Replay-protection nonce (must equal current stored nonce)
+- `snapshot`: `ExportSnapshot` returned by `export_snapshot`
+
+**Returns:** `true` on success
+
+**Events:** emits `SplitEvent::SnapshotImported`
+
+**Note:** `nonce` is only incremented by `initialize_split` and `import_snapshot`. `update_split` checks the nonce but does **not** increment it.
+
+---
+
+#### `verify_snapshot(env, snapshot) -> bool`
+
+Read-only integrity check for a snapshot payload — performs all structural checks (version, checksum, initialized flag, percentage ranges and sum, timestamp bounds) without requiring authorization or modifying state.
+
+**Parameters:**
+- `snapshot`: `ExportSnapshot` to verify
+
+**Returns:** `true` if all integrity checks pass, `false` otherwise
+
+**Use case:** pre-flight validation before calling `import_snapshot`, or off-chain verification of exported payloads.
+
 #### `calculate_split(env, total_amount) -> Vec<i128>`
 
 Storage-read-only calculation — returns `[spending, savings, bills, insurance]` amounts.
@@ -241,6 +316,8 @@ pub enum RemittanceSplitError {
 | `("split", Updated)` | `caller: Address` | `update_split` succeeds |
 | `("split", Calculated)` | `total_amount: i128` | `calculate_split` called |
 | `("split", DistributionCompleted)` | `(from: Address, total_amount: i128)` | `distribute_usdc` succeeds |
+| `("split", SnapshotExported)` | `caller: Address` | `export_snapshot` succeeds |
+| `("split", SnapshotImported)` | `caller: Address` | `import_snapshot` succeeds |
 
 ## Security Assumptions
 

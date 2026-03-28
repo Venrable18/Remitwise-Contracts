@@ -1,5 +1,7 @@
 #![no_std]
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+#[cfg(test)]
+mod test;
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token::TokenClient, vec,
@@ -27,7 +29,7 @@ pub struct SplitInitializedEvent {
 pub enum RemittanceSplitError {
     AlreadyInitialized = 1,
     NotInitialized = 2,
-    PercentagesDoNotSumTo100 = 3,
+    InvalidPercentages = 3,
     InvalidAmount = 4,
     Overflow = 5,
     Unauthorized = 6,
@@ -109,17 +111,19 @@ pub enum SplitEvent {
     Calculated,
     /// Emitted when distribute_usdc successfully completes all transfers.
     DistributionCompleted,
+    SnapshotExported,
+    SnapshotImported,
 }
 
 /// Snapshot for data export/import (migration).
 ///
-/// # Schema Version Tag
-/// `schema_version` carries the explicit snapshot format version.
-/// Importers **must** validate this field against the supported range
-/// (`MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION`) before applying the
-/// snapshot. Snapshots with an unknown future version must be rejected to
-/// guarantee forward/backward compatibility.
-/// `checksum` is a simple numeric digest for on-chain integrity verification.
+/// The checksum is an FNV-1a digest covering every scalar field
+/// (schema_version, all four percentages, config timestamp, the initialized
+/// flag, and the export timestamp). Any single-bit mutation to any covered
+/// field will produce a different checksum, making tampered payloads
+/// detectable before restore.
+/// Importers **must** validate `schema_version` against the supported range
+/// (`MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION`) before applying.
 #[contracttype]
 #[derive(Clone)]
 pub struct ExportSnapshot {
@@ -168,10 +172,10 @@ pub enum ScheduleEvent {
     Cancelled,
 }
 
-/// Current snapshot schema version. Bump this when the ExportSnapshot format changes.
-const SCHEMA_VERSION: u32 = 1;
+/// Current snapshot schema version. Bumped to 2 for FNV-1a checksum + exported_at field.
+const SCHEMA_VERSION: u32 = 2;
 /// Oldest snapshot schema version this contract can import. Enables backward compat.
-const MIN_SUPPORTED_SCHEMA_VERSION: u32 = 1;
+const MIN_SUPPORTED_SCHEMA_VERSION: u32 = 2;
 const MAX_AUDIT_ENTRIES: u32 = 100;
 const CONTRACT_VERSION: u32 = 1;
 
@@ -340,7 +344,7 @@ impl RemittanceSplit {
                     return Err(RemittanceSplitError::Unauthorized);
                 }
             }
-            Some(current_admin) => {
+            Some(ref current_admin) => {
                 // Admin transfer - only current admin can transfer
                 if *current_admin != caller {
                     return Err(RemittanceSplitError::Unauthorized);
@@ -449,7 +453,7 @@ impl RemittanceSplit {
         let total = spending_percent + savings_percent + bills_percent + insurance_percent;
         if total != 100 {
             Self::append_audit(&env, symbol_short!("init"), &owner, false);
-            return Err(RemittanceSplitError::PercentagesDoNotSumTo100);
+            return Err(RemittanceSplitError::InvalidPercentages);
         }
 
         Self::extend_instance_ttl(&env);
@@ -514,7 +518,7 @@ impl RemittanceSplit {
         let total = spending_percent + savings_percent + bills_percent + insurance_percent;
         if total != 100 {
             Self::append_audit(&env, symbol_short!("update"), &caller, false);
-            return Err(RemittanceSplitError::PercentagesDoNotSumTo100);
+            return Err(RemittanceSplitError::InvalidPercentages);
         }
 
         Self::extend_instance_ttl(&env);
@@ -772,6 +776,15 @@ impl RemittanceSplit {
             .unwrap_or(0)
     }
 
+    /// Export a portable snapshot of the current split configuration.
+    ///
+    /// The returned payload includes an FNV-1a checksum that covers the version,
+    /// all percentage fields, the config timestamp, the initialized flag, and
+    /// the export timestamp (`exported_at`). Any mutation to these fields will
+    /// be detected by `import_snapshot` or `verify_snapshot`.
+    ///
+    /// # Authorization
+    /// Only the contract owner may export a snapshot.
     pub fn export_snapshot(
         env: Env,
         caller: Address,
@@ -783,6 +796,7 @@ impl RemittanceSplit {
             .get(&symbol_short!("CONFIG"))
             .ok_or(RemittanceSplitError::NotInitialized)?;
         if config.owner != caller {
+            Self::append_audit(&env, symbol_short!("export"), &caller, false);
             return Err(RemittanceSplitError::Unauthorized);
         }
         let schedules = Self::get_remittance_schedules(env.clone(), caller.clone());
@@ -823,7 +837,7 @@ impl RemittanceSplit {
         Self::require_not_paused(&env)?;
         Self::require_nonce(&env, &caller, nonce)?;
 
-        // Accept any schema_version within the supported range for backward/forward compat.
+        // 1. Version boundary check
         if snapshot.schema_version < MIN_SUPPORTED_SCHEMA_VERSION
             || snapshot.schema_version > SCHEMA_VERSION
         {
@@ -836,6 +850,42 @@ impl RemittanceSplit {
             return Err(RemittanceSplitError::ChecksumMismatch);
         }
 
+        // 3. Initialized flag — a snapshot with initialized = false is
+        //    incomplete and must not be restored.
+        if !snapshot.config.initialized {
+            Self::append_audit(&env, symbol_short!("import"), &caller, false);
+            return Err(RemittanceSplitError::SnapshotNotInitialized);
+        }
+
+        // 4. Per-field percentage range — reject values that could not have
+        //    been produced by a valid initialize_split / update_split call.
+        if snapshot.config.spending_percent > 100
+            || snapshot.config.savings_percent > 100
+            || snapshot.config.bills_percent > 100
+            || snapshot.config.insurance_percent > 100
+        {
+            Self::append_audit(&env, symbol_short!("import"), &caller, false);
+            return Err(RemittanceSplitError::InvalidPercentageRange);
+        }
+
+        // 5. Sum constraint
+        let total = snapshot.config.spending_percent
+            + snapshot.config.savings_percent
+            + snapshot.config.bills_percent
+            + snapshot.config.insurance_percent;
+        if total != 100 {
+            Self::append_audit(&env, symbol_short!("import"), &caller, false);
+            return Err(RemittanceSplitError::InvalidPercentages);
+        }
+
+        // 6. Timestamp sanity — reject payloads whose timestamps are in the future.
+        let current_time = env.ledger().timestamp();
+        if snapshot.config.timestamp > current_time || snapshot.exported_at > current_time {
+            Self::append_audit(&env, symbol_short!("import"), &caller, false);
+            return Err(RemittanceSplitError::FutureTimestamp);
+        }
+
+        // 7. Caller must be the current contract owner.
         let existing: SplitConfig = env
             .storage()
             .instance()
@@ -846,13 +896,10 @@ impl RemittanceSplit {
             return Err(RemittanceSplitError::Unauthorized);
         }
 
-        let total = snapshot.config.spending_percent
-            + snapshot.config.savings_percent
-            + snapshot.config.bills_percent
-            + snapshot.config.insurance_percent;
-        if total != 100 {
+        // 8. Ownership mapping — prevent silent ownership transfer via snapshot.
+        if snapshot.config.owner != caller {
             Self::append_audit(&env, symbol_short!("import"), &caller, false);
-            return Err(RemittanceSplitError::PercentagesDoNotSumTo100);
+            return Err(RemittanceSplitError::OwnerMismatch);
         }
 
         Self::extend_instance_ttl(&env);
@@ -894,6 +941,74 @@ impl RemittanceSplit {
 
         Self::increment_nonce(&env, &caller)?;
         Self::append_audit(&env, symbol_short!("import"), &caller, true);
+        env.events()
+            .publish((symbol_short!("split"), SplitEvent::SnapshotImported), caller);
+        Ok(true)
+    }
+
+    /// Verify snapshot integrity without importing it.
+    ///
+    /// Runs the same checks as `import_snapshot` (version boundary, checksum,
+    /// initialized flag, per-field range, sum constraint, and timestamp sanity)
+    /// **without** modifying any contract state. Use this as a pre-flight check
+    /// before calling `import_snapshot`.
+    ///
+    /// Returns `Ok(true)` when the snapshot is valid and ready to import.
+    /// Returns an error variant describing the first failing check.
+    ///
+    /// # Note
+    /// This function does **not** verify ownership mapping (that requires knowing
+    /// which address will perform the import) or nonce validity.
+    pub fn verify_snapshot(
+        env: Env,
+        snapshot: ExportSnapshot,
+    ) -> Result<bool, RemittanceSplitError> {
+        // 1. Version boundary
+        if snapshot.schema_version < MIN_SUPPORTED_SCHEMA_VERSION
+            || snapshot.schema_version > SCHEMA_VERSION
+        {
+            return Err(RemittanceSplitError::UnsupportedVersion);
+        }
+
+        // 2. Checksum
+        let expected = Self::compute_checksum(
+            snapshot.schema_version,
+            &snapshot.config,
+            snapshot.exported_at,
+        );
+        if snapshot.checksum != expected {
+            return Err(RemittanceSplitError::ChecksumMismatch);
+        }
+
+        // 3. Initialized flag
+        if !snapshot.config.initialized {
+            return Err(RemittanceSplitError::SnapshotNotInitialized);
+        }
+
+        // 4. Per-field range
+        if snapshot.config.spending_percent > 100
+            || snapshot.config.savings_percent > 100
+            || snapshot.config.bills_percent > 100
+            || snapshot.config.insurance_percent > 100
+        {
+            return Err(RemittanceSplitError::InvalidPercentageRange);
+        }
+
+        // 5. Sum constraint
+        let total = snapshot.config.spending_percent
+            + snapshot.config.savings_percent
+            + snapshot.config.bills_percent
+            + snapshot.config.insurance_percent;
+        if total != 100 {
+            return Err(RemittanceSplitError::InvalidPercentages);
+        }
+
+        // 6. Timestamp sanity
+        let current_time = env.ledger().timestamp();
+        if snapshot.config.timestamp > current_time || snapshot.exported_at > current_time {
+            return Err(RemittanceSplitError::FutureTimestamp);
+        }
+
         Ok(true)
     }
 
@@ -1392,5 +1507,3 @@ impl RemittanceSplit {
     }
 }
 
-#[cfg(test)]
-mod test;
