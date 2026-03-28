@@ -145,7 +145,8 @@ impl BillPayments {
     ///
     /// # Errors
     /// * `InvalidAmount` - If amount is zero or negative
-    /// * `InvalidFrequency` - If recurring is true but frequency_days is 0
+    /// * `InvalidFrequency` - If recurring is true but frequency_days is 0 or exceeds MAX_FREQUENCY_DAYS
+    /// * `InvalidDueDate` - If due_date is invalid or arithmetic overflows
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
@@ -544,8 +545,8 @@ impl BillPayments {
     ///
     /// # Errors
     /// * `InvalidAmount` - If amount is zero or negative
-    /// * `InvalidFrequency` - If recurring is true but frequency_days is 0
-    /// * `InvalidDueDate` - If due_date is 0 or in the past
+    /// * `InvalidFrequency` - If recurring is true but frequency_days is 0 or exceeds MAX_FREQUENCY_DAYS
+    /// * `InvalidDueDate` - If due_date is 0, in the past, or would overflow on recurrence
     /// * `InvalidCurrency` - If currency code is invalid (non-alphanumeric or wrong length)
     /// * `ContractPaused` - If contract is globally paused
     /// * `FunctionPaused` - If create_bill function is paused
@@ -578,7 +579,7 @@ impl BillPayments {
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
-        if recurring && frequency_days == 0 {
+        if recurring && (frequency_days == 0 || frequency_days > MAX_FREQUENCY_DAYS) {
             return Err(Error::InvalidFrequency);
         }
 
@@ -665,7 +666,13 @@ impl BillPayments {
         bill.paid_at = Some(current_time);
 
         if bill.recurring {
-            let next_due_date = bill.due_date + (bill.frequency_days as u64 * 86400);
+            let next_due_date = bill.due_date
+                .checked_add(
+                    (bill.frequency_days as u64)
+                        .checked_mul(SECONDS_PER_DAY)
+                        .ok_or(Error::InvalidFrequency)?
+                )
+                .ok_or(Error::InvalidDueDate)?;
             let next_id = env
                 .storage()
                 .instance()
@@ -1334,7 +1341,13 @@ impl BillPayments {
 
             if bill.recurring {
                 next_id = next_id.saturating_add(1);
-                let next_due_date = bill.due_date + (bill.frequency_days as u64 * 86400);
+                let next_due_date = bill.due_date
+                    .checked_add(
+                        (bill.frequency_days as u64)
+                            .checked_mul(SECONDS_PER_DAY)
+                            .ok_or(Error::InvalidFrequency)?
+                    )
+                    .ok_or(Error::InvalidDueDate)?;
                 let next_bill = Bill {
                     id: next_id,
                     owner: bill.owner.clone(),
@@ -3120,5 +3133,52 @@ mod test {
         let admin = Address::generate(&env);
 
         client.bulk_cleanup_bills(&admin, &1000000);
+    }
+
+    #[test]
+    fn test_create_bill_max_frequency_exceeded() {
+        let env = make_env();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &cid);
+        let owner = Address::generate(&env);
+
+        let result = client.try_create_bill(
+            &owner,
+            &String::from_str(&env, "Too Long"),
+            &100,
+            &1000000,
+            &true,
+            &(MAX_FREQUENCY_DAYS + 1), // Exceeds max frequency
+            &None,
+            &String::from_str(&env, "XLM"),
+        );
+
+        assert_eq!(result, Err(Ok(Error::InvalidFrequency)));
+    }
+
+    #[test]
+    fn test_pay_bill_date_overflow_protection() {
+        let env = make_env();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &cid);
+        let owner = Address::generate(&env);
+
+        // Create a bill with a very large due_date
+        let bill_id = client.create_bill(
+            &owner,
+            &String::from_str(&env, "Overflow Potential"),
+            &100,
+            &(u64::MAX - 100), // Near u64::MAX
+            &true,
+            &30,
+            &None,
+            &String::from_str(&env, "XLM"),
+        );
+
+        // Paying this should fail because next_due_date would overflow
+        let result = client.try_pay_bill(&owner, &bill_id);
+        assert_eq!(result, Err(Ok(Error::InvalidDueDate)));
     }
 }

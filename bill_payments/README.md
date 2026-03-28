@@ -109,12 +109,12 @@ Creates a new bill with currency specification.
 - `amount`: Payment amount (must be positive)
 - `due_date`: Due date as Unix timestamp
 - `recurring`: Whether this is a recurring bill
-- `frequency_days`: Frequency in days for recurring bills (> 0 if recurring)
+- `frequency_days`: Frequency in days for recurring bills (0 < frequency_days <= 36500)
 - `currency`: Currency code (e.g., "XLM", "USDC", "NGN"). Case-insensitive, whitespace trimmed, defaults to "XLM" if empty.
 
 **Returns:** Bill ID on success
 
-**Errors:** InvalidAmount, InvalidFrequency, InvalidCurrency
+**Errors:** InvalidAmount, InvalidFrequency (if 0 or > 36500), InvalidCurrency, InvalidDueDate (if arithmetic overflows on recurrence)
 
 **Currency Normalization:**
 - Converts to uppercase (e.g., "usdc" → "USDC")
