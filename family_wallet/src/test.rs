@@ -465,6 +465,162 @@ fn test_role_expiry_unauthorized_member_cannot_renew() {
 }
 
 #[test]
+fn test_set_proposal_expiry_success() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    client.init(&owner, &vec![&env]);
+
+    let new_expiry = 3600u64; // 1 hour
+    let result = client.set_proposal_expiry(&owner, &new_expiry);
+    assert!(result);
+
+    assert_eq!(client.get_proposal_expiry_public(), new_expiry);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")]
+fn test_set_proposal_expiry_unauthorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let member = Address::generate(&env);
+    client.init(&owner, &vec![&env, member.clone()]);
+
+    client.set_proposal_expiry(&member, &3600);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #15)")]
+fn test_set_proposal_expiry_invalid_duration() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    client.init(&owner, &vec![&env]);
+
+    client.set_proposal_expiry(&owner, &(MAX_PROPOSAL_EXPIRY + 1));
+}
+
+#[test]
+fn test_cancel_transaction_by_proposer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let member = Address::generate(&env);
+    client.init(&owner, &vec![&env, member.clone()]);
+
+    let signers = vec![&env, owner.clone(), member.clone()];
+    client.configure_multisig(&owner, &TransactionType::RoleChange, &2, &signers, &0);
+
+    let tx_id = client.propose_role_change(&member, &member, &FamilyRole::Admin);
+    assert!(tx_id > 0);
+
+    let result = client.cancel_transaction(&member, &tx_id);
+    assert!(result);
+
+    let pending = client.get_pending_transaction(&tx_id);
+    assert!(pending.is_none());
+}
+
+#[test]
+fn test_cancel_transaction_by_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let member = Address::generate(&env);
+    client.init(&owner, &vec![&env, member.clone()]);
+
+    let signers = vec![&env, owner.clone(), member.clone()];
+    client.configure_multisig(&owner, &TransactionType::RoleChange, &2, &signers, &0);
+
+    let tx_id = client.propose_role_change(&member, &member, &FamilyRole::Admin);
+
+    let result = client.cancel_transaction(&owner, &tx_id);
+    assert!(result);
+
+    let pending = client.get_pending_transaction(&tx_id);
+    assert!(pending.is_none());
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")]
+fn test_cancel_transaction_unauthorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let member1 = Address::generate(&env);
+    let member2 = Address::generate(&env);
+    client.init(&owner, &vec![&env, member1.clone(), member2.clone()]);
+
+    let signers = vec![&env, owner.clone(), member1.clone()];
+    client.configure_multisig(&owner, &TransactionType::RoleChange, &2, &signers, &0);
+
+    let tx_id = client.propose_role_change(&member1, &member1, &FamilyRole::Admin);
+
+    // member2 is neither proposer nor admin
+    client.cancel_transaction(&member2, &tx_id);
+}
+
+#[test]
+#[should_panic(expected = "Transaction expired")]
+fn test_proposal_expiry_enforced() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let member = Address::generate(&env);
+    client.init(&owner, &vec![&env, member.clone()]);
+
+    let expiry = 3600u64;
+    client.set_proposal_expiry(&owner, &expiry);
+
+    let signers = vec![&env, owner.clone(), member.clone()];
+    client.configure_multisig(&owner, &TransactionType::RoleChange, &2, &signers, &0);
+
+    set_ledger_time(&env, 100, 1000);
+    let tx_id = client.propose_role_change(&owner, &member, &FamilyRole::Admin);
+
+    // Jump past expiry
+    set_ledger_time(&env, 101, 1000 + expiry + 1);
+
+    client.sign_transaction(&member, &tx_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_cancel_transaction_not_found() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    client.init(&owner, &vec![&env]);
+
+    client.cancel_transaction(&owner, &999);
+}
+
+#[test]
 #[should_panic(expected = "Role has expired")]
 fn test_role_expiry_expired_admin_cannot_renew_self() {
     let env = Env::default();
@@ -1177,9 +1333,19 @@ fn test_emergency_proposal_replay_prevention() {
     let token_admin = Address::generate(&env);
     let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
     let recipient = Address::generate(&env);
-    
-    client.propose_emergency_transfer(&member1, &token_contract.address(), &recipient, &1000_0000000);
-    client.propose_emergency_transfer(&member1, &token_contract.address(), &recipient, &1000_0000000);
+
+    client.propose_emergency_transfer(
+        &member1,
+        &token_contract.address(),
+        &recipient,
+        &1000_0000000,
+    );
+    client.propose_emergency_transfer(
+        &member1,
+        &token_contract.address(),
+        &recipient,
+        &1000_0000000,
+    );
 }
 
 #[test]
@@ -1196,9 +1362,19 @@ fn test_emergency_proposal_frequency_burst() {
     let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
     let recipient1 = Address::generate(&env);
     let recipient2 = Address::generate(&env);
-    
-    client.propose_emergency_transfer(&member1, &token_contract.address(), &recipient1, &1000_0000000);
-    client.propose_emergency_transfer(&member1, &token_contract.address(), &recipient2, &500_0000000);
+
+    client.propose_emergency_transfer(
+        &member1,
+        &token_contract.address(),
+        &recipient1,
+        &1000_0000000,
+    );
+    client.propose_emergency_transfer(
+        &member1,
+        &token_contract.address(),
+        &recipient2,
+        &500_0000000,
+    );
 }
 
 #[test]
@@ -1215,8 +1391,13 @@ fn test_emergency_proposal_role_misuse() {
     let token_admin = Address::generate(&env);
     let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
     let recipient = Address::generate(&env);
-    
-    client.propose_emergency_transfer(&viewer, &token_contract.address(), &recipient, &1000_0000000);
+
+    client.propose_emergency_transfer(
+        &viewer,
+        &token_contract.address(),
+        &recipient,
+        &1000_0000000,
+    );
 }
 
 // ============================================================================

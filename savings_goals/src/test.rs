@@ -102,7 +102,11 @@ fn test_init_idempotent_does_not_wipe_goals() {
     assert_eq!(goal_after_second_init.current_amount, 0);
 
     let all_goals = client.get_all_goals(&owner_a);
-    assert_eq!(all_goals.len(), 1, "get_all_goals must still return the one goal");
+    assert_eq!(
+        all_goals.len(),
+        1,
+        "get_all_goals must still return the one goal"
+    );
 
     // Verify NEXT_ID was not reset: next created goal must get goal_id == 2, not 1
     let name2 = String::from_str(&env, "Second Goal");
@@ -441,7 +445,10 @@ fn test_withdraw_from_goal_nonexistent_goal_panics() {
     client.init();
     env.mock_all_auths();
     let result = client.try_withdraw_from_goal(&user, &999, &100);
-    assert!(result.is_err(), "Expected error for nonexistent goal withdrawal");
+    assert!(
+        result.is_err(),
+        "Expected error for nonexistent goal withdrawal"
+    );
 }
 
 #[test]
@@ -2015,7 +2022,12 @@ fn test_export_snapshot_contains_correct_schema_version() {
     let owner = Address::generate(&env);
 
     client.init();
-    let _id = client.create_goal(&owner, &String::from_str(&env, "House"), &10000, &2000000000);
+    let _id = client.create_goal(
+        &owner,
+        &String::from_str(&env, "House"),
+        &10000,
+        &2000000000,
+    );
 
     let snapshot = client.export_snapshot(&owner);
     assert_eq!(
@@ -2079,7 +2091,12 @@ fn test_import_snapshot_too_old_schema_version_rejected() {
     let owner = Address::generate(&env);
 
     client.init();
-    client.create_goal(&owner, &String::from_str(&env, "Education"), &8000, &2000000000);
+    client.create_goal(
+        &owner,
+        &String::from_str(&env, "Education"),
+        &8000,
+        &2000000000,
+    );
 
     let mut snapshot = client.export_snapshot(&owner);
     // Simulate a snapshot too old to be safely imported.
@@ -2104,7 +2121,12 @@ fn test_import_snapshot_tampered_checksum_rejected() {
     let owner = Address::generate(&env);
 
     client.init();
-    client.create_goal(&owner, &String::from_str(&env, "Savings"), &2000, &2000000000);
+    client.create_goal(
+        &owner,
+        &String::from_str(&env, "Savings"),
+        &2000,
+        &2000000000,
+    );
 
     let mut snapshot = client.export_snapshot(&owner);
     snapshot.checksum = snapshot.checksum.wrapping_add(1);
@@ -2127,8 +2149,18 @@ fn test_snapshot_export_import_roundtrip_restores_goals() {
     let owner = Address::generate(&env);
 
     client.init();
-    let id1 = client.create_goal(&owner, &String::from_str(&env, "Fund A"), &5000, &2000000000);
-    let id2 = client.create_goal(&owner, &String::from_str(&env, "Fund B"), &8000, &2000000000);
+    let id1 = client.create_goal(
+        &owner,
+        &String::from_str(&env, "Fund A"),
+        &5000,
+        &2000000000,
+    );
+    let id2 = client.create_goal(
+        &owner,
+        &String::from_str(&env, "Fund B"),
+        &8000,
+        &2000000000,
+    );
     client.add_to_goal(&owner, &id1, &1500);
 
     let snapshot = client.export_snapshot(&owner);
@@ -2157,14 +2189,22 @@ fn test_import_snapshot_min_supported_version_accepted() {
     let owner = Address::generate(&env);
 
     client.init();
-    client.create_goal(&owner, &String::from_str(&env, "Min Version"), &1000, &2000000000);
+    client.create_goal(
+        &owner,
+        &String::from_str(&env, "Min Version"),
+        &1000,
+        &2000000000,
+    );
 
     let snapshot = client.export_snapshot(&owner);
     // schema_version is already 1 == MIN_SUPPORTED_SCHEMA_VERSION.
     assert_eq!(snapshot.schema_version, 1);
 
     let ok = client.import_snapshot(&owner, &0, &snapshot);
-    assert!(ok, "snapshot at MIN_SUPPORTED_SCHEMA_VERSION must be accepted");
+    assert!(
+        ok,
+        "snapshot at MIN_SUPPORTED_SCHEMA_VERSION must be accepted"
+    );
 }
 
 // ============================================================================

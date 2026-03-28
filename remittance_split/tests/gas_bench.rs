@@ -111,7 +111,7 @@ fn bench_create_multiple_schedules() {
     let client = RemittanceSplitClient::new(&env, &contract_id);
 
     let owner = <Address as AddressTrait>::generate(&env);
-    
+
     // Create 10 schedules first to establish baseline storage state
     for i in 1..=10 {
         let amount = 1_000i128 * i as i128;
@@ -160,7 +160,13 @@ fn bench_modify_remittance_schedule() {
     let new_interval = 604_800u64; // 1 week in seconds
 
     let (cpu, mem, result) = measure(&env, || {
-        client.modify_remittance_schedule(&owner, &schedule_id, &new_amount, &new_next_due, &new_interval)
+        client.modify_remittance_schedule(
+            &owner,
+            &schedule_id,
+            &new_amount,
+            &new_next_due,
+            &new_interval,
+        )
     });
     
     assert!(result);
@@ -207,10 +213,8 @@ fn bench_get_remittance_schedules_empty() {
 
     let owner = <Address as AddressTrait>::generate(&env);
 
-    let (cpu, mem, schedules) = measure(&env, || {
-        client.get_remittance_schedules(&owner)
-    });
-    
+    let (cpu, mem, schedules) = measure(&env, || client.get_remittance_schedules(&owner));
+
     assert_eq!(schedules.len(), 0);
 
     println!(
@@ -229,7 +233,7 @@ fn bench_get_remittance_schedules_with_data() {
 
     let owner1 = <Address as AddressTrait>::generate(&env);
     let owner2 = <Address as AddressTrait>::generate(&env);
-    
+
     // Create 5 schedules for owner1
     for i in 1..=5 {
         let amount = 1_000i128 * i as i128;
@@ -248,10 +252,8 @@ fn bench_get_remittance_schedules_with_data() {
         let _result = client.create_remittance_schedule(&owner2, &amount, &next_due, &interval);
     }
 
-    let (cpu, mem, schedules) = measure(&env, || {
-        client.get_remittance_schedules(&owner1)
-    });
-    
+    let (cpu, mem, schedules) = measure(&env, || client.get_remittance_schedules(&owner1));
+
     // Should only return owner1's schedules (data isolation test)
     assert_eq!(schedules.len(), 5);
 
@@ -277,10 +279,8 @@ fn bench_get_remittance_schedule_single() {
     // Create schedule
     let schedule_id = client.create_remittance_schedule(&owner, &amount, &next_due, &interval);
 
-    let (cpu, mem, schedule) = measure(&env, || {
-        client.get_remittance_schedule(&schedule_id)
-    });
-    
+    let (cpu, mem, schedule) = measure(&env, || client.get_remittance_schedule(&schedule_id));
+
     assert!(schedule.is_some());
     let schedule = schedule.unwrap();
     assert_eq!(schedule.owner, owner);
@@ -301,7 +301,7 @@ fn bench_schedule_operations_worst_case() {
     let client = RemittanceSplitClient::new(&env, &contract_id);
 
     let owner = <Address as AddressTrait>::generate(&env);
-    
+
     // Create 50 schedules to establish worst-case storage state
     for i in 1..=50 {
         let amount = 1_000i128 * i as i128;
@@ -312,10 +312,8 @@ fn bench_schedule_operations_worst_case() {
     }
 
     // Measure query performance with 50 schedules
-    let (cpu, mem, schedules) = measure(&env, || {
-        client.get_remittance_schedules(&owner)
-    });
-    
+    let (cpu, mem, schedules) = measure(&env, || client.get_remittance_schedules(&owner));
+
     assert_eq!(schedules.len(), 50);
 
     println!(
