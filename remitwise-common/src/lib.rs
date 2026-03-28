@@ -79,9 +79,13 @@ pub const DAY_IN_LEDGERS: u32 = 17280;
 pub const INSTANCE_BUMP_AMOUNT: u32 = 30 * DAY_IN_LEDGERS; // 30 days
 pub const INSTANCE_LIFETIME_THRESHOLD: u32 = 7 * DAY_IN_LEDGERS; // 7 days
 
-/// Storage TTL constants for archived data
-pub const ARCHIVE_LIFETIME_THRESHOLD: u32 = 17280; // ~1 day
-pub const ARCHIVE_BUMP_AMOUNT: u32 = 2592000; // ~180 days (6 months)
+/// Persistent storage TTL constants
+pub const PERSISTENT_BUMP_AMOUNT: u32 = 60 * DAY_IN_LEDGERS; // 60 days
+pub const PERSISTENT_LIFETIME_THRESHOLD: u32 = 15 * DAY_IN_LEDGERS; // 15 days
+
+/// Archive storage TTL constants
+pub const ARCHIVE_BUMP_AMOUNT: u32 = 150 * DAY_IN_LEDGERS; // ~150 days
+pub const ARCHIVE_LIFETIME_THRESHOLD: u32 = 1 * DAY_IN_LEDGERS; // 1 day
 
 /// Signature expiration time (24 hours in seconds)
 pub const SIGNATURE_EXPIRATION: u64 = 86400;
@@ -104,31 +108,9 @@ pub fn clamp_limit(limit: u32) -> u32 {
 }
 
 /// Event emission helper
-///
-/// # Deterministic topic naming
-///
-/// All events emitted via `RemitwiseEvents` follow a deterministic topic schema:
-///
-/// 1. A fixed namespace symbol: `"Remitwise"`.
-/// 2. An event category as `u32` (see `EventCategory`).
-/// 3. An event priority as `u32` (see `EventPriority`).
-/// 4. An action `Symbol` describing the specific event or a subtype (e.g. `"created"`).
-///
-/// This ordering allows consumers to index and filter events reliably across contracts.
 pub struct RemitwiseEvents;
 
 impl RemitwiseEvents {
-    /// Emit a single event with deterministic topics.
-    ///
-    /// # Parameters
-    /// - `env`: Soroban environment used to publish the event.
-    /// - `category`: Logical event category (`EventCategory`).
-    /// - `priority`: Event priority (`EventPriority`).
-    /// - `action`: A `Symbol` identifying the action or event name.
-    /// - `data`: The serializable payload for the event.
-    ///
-    /// # Security
-    /// Do not include sensitive personal data in `data` because events are publicly visible on-chain.
     pub fn emit<T>(
         env: &soroban_sdk::Env,
         category: EventCategory,
@@ -147,10 +129,6 @@ impl RemitwiseEvents {
         env.events().publish(topics, data);
     }
 
-    /// Emit a small batch-style event indicating bulk operations.
-    ///
-    /// The `action` parameter is included in the payload rather than as the final topic
-    /// to make the topic schema consistent for batch analytics.
     pub fn emit_batch(env: &soroban_sdk::Env, category: EventCategory, action: Symbol, count: u32) {
         let topics = (
             symbol_short!("Remitwise"),
@@ -162,6 +140,3 @@ impl RemitwiseEvents {
         env.events().publish(topics, data);
     }
 }
-
-pub const PERSISTENT_BUMP_AMOUNT: u32 = 60 * DAY_IN_LEDGERS; // 60 days
-pub const PERSISTENT_LIFETIME_THRESHOLD: u32 = 15 * DAY_IN_LEDGERS; // 15 days
