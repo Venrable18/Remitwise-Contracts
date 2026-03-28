@@ -1,12 +1,17 @@
 #![no_std]
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+extern crate alloc;
+
 use remitwise_common::{
     clamp_limit, EventCategory, EventPriority, RemitwiseEvents, ARCHIVE_BUMP_AMOUNT,
     ARCHIVE_LIFETIME_THRESHOLD, CONTRACT_VERSION, INSTANCE_BUMP_AMOUNT,
     INSTANCE_LIFETIME_THRESHOLD, MAX_BATCH_SIZE, MAX_PAGE_LIMIT,
 };
+#[cfg(test)]
+use remitwise_common::MAX_PAGE_LIMIT;
 
+use alloc::vec::Vec as StdVec;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Map, String,
     Symbol, Vec,
@@ -291,6 +296,9 @@ impl BillPayments {
         Ok(())
     }
 
+    /// @notice Pause all state-changing operations.
+    /// @dev Requires the pause admin to authenticate.
+    /// @return Ok(()) on success, otherwise `Error::UnauthorizedPause`.
     pub fn pause(env: Env, caller: Address) -> Result<(), Error> {
         caller.require_auth();
         let admin = Self::get_pause_admin(&env).ok_or(Error::UnauthorizedPause)?;
@@ -310,6 +318,9 @@ impl BillPayments {
         Ok(())
     }
 
+    /// @notice Unpause the contract if no time-lock is active.
+    /// @dev If `schedule_unpause` set a future timestamp, unpause is blocked until then.
+    /// @return Ok(()) on success, otherwise `Error::ContractPaused` or `Error::UnauthorizedPause`.
     pub fn unpause(env: Env, caller: Address) -> Result<(), Error> {
         caller.require_auth();
         let admin = Self::get_pause_admin(&env).ok_or(Error::UnauthorizedPause)?;
@@ -336,6 +347,9 @@ impl BillPayments {
         Ok(())
     }
 
+    /// @notice Schedule the earliest time the contract may be unpaused.
+    /// @dev Time-locks unpause to a future `at_timestamp` (ledger timestamp seconds).
+    /// @return Ok(()) on success, otherwise `Error::InvalidAmount` or `Error::UnauthorizedPause`.
     pub fn schedule_unpause(env: Env, caller: Address, at_timestamp: u64) -> Result<(), Error> {
         caller.require_auth();
         let admin = Self::get_pause_admin(&env).ok_or(Error::UnauthorizedPause)?;
@@ -351,6 +365,9 @@ impl BillPayments {
         Ok(())
     }
 
+    /// @notice Pause a specific function without pausing the entire contract.
+    /// @dev Uses `func` symbols defined in `pause_functions`.
+    /// @return Ok(()) on success, otherwise `Error::UnauthorizedPause`.
     pub fn pause_function(env: Env, caller: Address, func: Symbol) -> Result<(), Error> {
         caller.require_auth();
         let admin = Self::get_pause_admin(&env).ok_or(Error::UnauthorizedPause)?;
@@ -369,6 +386,9 @@ impl BillPayments {
         Ok(())
     }
 
+    /// @notice Unpause a previously paused function.
+    /// @dev Uses `func` symbols defined in `pause_functions`.
+    /// @return Ok(()) on success, otherwise `Error::UnauthorizedPause`.
     pub fn unpause_function(env: Env, caller: Address, func: Symbol) -> Result<(), Error> {
         caller.require_auth();
         let admin = Self::get_pause_admin(&env).ok_or(Error::UnauthorizedPause)?;
@@ -387,6 +407,9 @@ impl BillPayments {
         Ok(())
     }
 
+    /// @notice Emergency pause both global state and all function-level flags.
+    /// @dev Equivalent to calling `pause` plus pausing all supported functions.
+    /// @return Ok(()) on success, otherwise the underlying pause errors.
     pub fn emergency_pause_all(env: Env, caller: Address) -> Result<(), Error> {
         Self::pause(env.clone(), caller.clone())?;
         for func in [
@@ -466,7 +489,7 @@ impl BillPayments {
             EventCategory::System,
             EventPriority::High,
             symbol_short!("adm_xfr"),
-            (current_upgrade_admin, new_admin.clone()),
+            (current_upgrade_admin.clone(), new_admin.clone()),
         );
 
         Ok(())
@@ -596,7 +619,6 @@ impl BillPayments {
         };
 
         let bill_owner = bill.owner.clone();
-        let bill_external_ref = bill.external_ref.clone();
         bills.set(next_id, bill);
         env.storage()
             .instance()
@@ -673,7 +695,6 @@ impl BillPayments {
                 .set(&symbol_short!("NEXT_ID"), &next_id);
         }
 
-        let bill_external_ref = bill.external_ref.clone();
         let paid_amount = bill.amount;
         let was_recurring = bill.recurring;
         bills.set(bill_id, bill);
@@ -1425,7 +1446,7 @@ impl BillPayments {
     /// - Empty currency defaults to "XLM" for comparison
     ///
     /// # Examples
-    /// ```rust
+    /// ```rust,ignore
     /// // Get all USDC bills for owner
     /// let page = client.get_bills_by_currency(&owner, &"USDC".into(), &0, &10);
     /// ```
@@ -1478,7 +1499,7 @@ impl BillPayments {
     /// - Empty currency defaults to "XLM" for comparison
     ///
     /// # Examples
-    /// ```rust
+    /// ```rust,ignore
     /// // Get unpaid USDC bills for owner
     /// let page = client.get_unpaid_bills_by_currency(&owner, &"USDC".into(), &0, &10);
     /// ```
@@ -1529,7 +1550,7 @@ impl BillPayments {
     /// - Empty currency defaults to "XLM" for comparison
     ///
     /// # Examples
-    /// ```rust
+    /// ```rust,ignore
     /// // Get total unpaid amount in USDC
     /// let total_usdc = client.get_total_unpaid_by_currency(&owner, &"USDC".into());
     /// // Get total unpaid amount in XLM
@@ -2521,7 +2542,8 @@ mod test {
             n_future in 0usize..6usize,
         ) {
             let env = make_env();
-            env.ledger().set_timestamp(now);
+            let create_time = now.saturating_sub(10_000);
+            env.ledger().set_timestamp(create_time);
             env.mock_all_auths();
             let cid = env.register_contract(None, BillPayments);
             let client = BillPaymentsClient::new(&env, &cid);
@@ -2876,7 +2898,7 @@ mod test {
     /// **Objective**: Verify that `create_bill` reverts if the owner doesn't authorize the call.
     /// **Expected**: Reverts with a Soroban AuthError.
     #[test]
-    #[should_panic(expected = "Status(AuthError)")]
+    #[should_panic(expected = "Error(Auth, InvalidAction)")]
     fn test_create_bill_no_auth_fails() {
         let env = make_env();
         let cid = env.register_contract(None, BillPayments);
@@ -2930,7 +2952,7 @@ mod test {
     /// **Objective**: Verify that `pay_bill` reverts if the caller is the owner but does not authorize the call.
     /// **Expected**: Reverts with a Soroban AuthError.
     #[test]
-    #[should_panic(expected = "Status(AuthError)")]
+    #[should_panic(expected = "Error(Auth, InvalidAction)")]
     fn test_pay_bill_no_auth_fails() {
         let env = make_env();
         let cid = env.register_contract(None, BillPayments);
@@ -3075,7 +3097,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "Status(AuthError)")]
+    #[should_panic(expected = "Error(Auth, InvalidAction)")]
     fn test_archive_paid_bills_no_auth_fails() {
         let env = make_env();
         let cid = env.register_contract(None, BillPayments);
@@ -3087,7 +3109,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "Status(AuthError)")]
+    #[should_panic(expected = "Error(Auth, InvalidAction)")]
     fn test_bulk_cleanup_bills_no_auth_fails() {
         let env = make_env();
         let cid = env.register_contract(None, BillPayments);

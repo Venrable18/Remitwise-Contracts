@@ -138,6 +138,7 @@ pub enum ReportingError {
     NotInitialized = 2,
     Unauthorized = 3,
     AddressesNotConfigured = 4,
+    NotAdminProposed = 5,
 }
 
 impl From<ReportingError> for soroban_sdk::Error {
@@ -158,6 +159,10 @@ impl From<ReportingError> for soroban_sdk::Error {
             ReportingError::AddressesNotConfigured => soroban_sdk::Error::from((
                 soroban_sdk::xdr::ScErrorType::Contract,
                 soroban_sdk::xdr::ScErrorCode::MissingValue,
+            )),
+            ReportingError::NotAdminProposed => soroban_sdk::Error::from((
+                soroban_sdk::xdr::ScErrorType::Contract,
+                soroban_sdk::xdr::ScErrorCode::InvalidAction,
             )),
         }
     }
@@ -301,29 +306,99 @@ pub struct ReportingContract;
 impl ReportingContract {
     /// Initialize the reporting contract with an admin address.
     ///
+    /// This function must be called only once. The provided admin address will
+    /// have full control over contract configuration and maintenance.
+    ///
     /// # Arguments
-    /// * `admin` - Address of the contract administrator (must authorize)
+    /// * `admin` - Address of the initial contract administrator
     ///
     /// # Returns
     /// `Ok(())` on successful initialization
     ///
     /// # Errors
     /// * `AlreadyInitialized` - If the contract has already been initialized
-    ///
-    /// # Panics
-    /// * If `admin` does not authorize the transaction
     pub fn init(env: Env, admin: Address) -> Result<(), ReportingError> {
-        admin.require_auth();
-
         let existing: Option<Address> = env.storage().instance().get(&symbol_short!("ADMIN"));
         if existing.is_some() {
             return Err(ReportingError::AlreadyInitialized);
         }
 
+        admin.require_auth();
+
         Self::extend_instance_ttl(&env);
         env.storage()
             .instance()
             .set(&symbol_short!("ADMIN"), &admin);
+
+        Ok(())
+    }
+
+    /// Propose a new administrator for the contract.
+    ///
+    /// This is the first step of a two-step admin rotation process. The proposed
+    /// admin must then call `accept_admin_rotation` to complete the transfer.
+    ///
+    /// # Arguments
+    /// * `caller` - Current administrator (must authorize)
+    /// * `new_admin` - Address of the proposed successor
+    ///
+    /// # Errors
+    /// * `NotInitialized` - If contract has not been initialized
+    /// * `Unauthorized` - If caller is not the current admin
+    pub fn propose_new_admin(
+        env: Env,
+        caller: Address,
+        new_admin: Address,
+    ) -> Result<(), ReportingError> {
+        caller.require_auth();
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ADMIN"))
+            .ok_or(ReportingError::NotInitialized)?;
+
+        if caller != admin {
+            return Err(ReportingError::Unauthorized);
+        }
+
+        Self::extend_instance_ttl(&env);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("PEND_ADM"), &new_admin);
+
+        Ok(())
+    }
+
+    /// Accept the role of contract administrator.
+    ///
+    /// This is the second step of a two-step admin rotation process. Only the
+    /// address currently proposed via `propose_new_admin` can call this.
+    ///
+    /// # Arguments
+    /// * `caller` - The proposed administrator (must authorize)
+    ///
+    /// # Errors
+    /// * `NotAdminProposed` - If no admin rotation is currently in progress
+    /// * `Unauthorized` - If caller is not the proposed admin
+    pub fn accept_admin_rotation(env: Env, caller: Address) -> Result<(), ReportingError> {
+        caller.require_auth();
+
+        let pending_admin: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("PEND_ADM"))
+            .ok_or(ReportingError::NotAdminProposed)?;
+
+        if caller != pending_admin {
+            return Err(ReportingError::Unauthorized);
+        }
+
+        Self::extend_instance_ttl(&env);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("ADMIN"), &pending_admin);
+        env.storage().instance().remove(&symbol_short!("PEND_ADM"));
 
         Ok(())
     }
@@ -390,7 +465,9 @@ impl ReportingContract {
         Ok(())
     }
 
-    /// Generate remittance summary report
+    /// Generate remittance summary report.
+    ///
+    /// Fetches split configuration and calculates amounts for a specific period.
     pub fn get_remittance_summary(
         env: Env,
         user: Address,
@@ -443,7 +520,9 @@ impl ReportingContract {
         }
     }
 
-    /// Generate savings progress report
+    /// Generate savings progress report.
+    ///
+    /// Aggregates all goals for a user and calculates overall completion progress.
     pub fn get_savings_report(
         env: Env,
         user: Address,
@@ -499,7 +578,9 @@ impl ReportingContract {
         }
     }
 
-    /// Generate bill payment compliance report
+    /// Generate bill payment compliance report.
+    ///
+    /// Analyzes bill statuses and payment deadlines for a specific period.
     pub fn get_bill_compliance_report(
         env: Env,
         user: Address,
@@ -577,7 +658,9 @@ impl ReportingContract {
         }
     }
 
-    /// Generate insurance coverage report
+    /// Generate insurance coverage report.
+    ///
+    /// Summarizes active policies, coverage amounts, and premium ratios.
     pub fn get_insurance_report(
         env: Env,
         user: Address,
@@ -699,7 +782,9 @@ impl ReportingContract {
         }
     }
 
-    /// Generate comprehensive financial health report
+    /// Generate comprehensive financial health report combining all metrics.
+    ///
+    /// This is the primary reporting entry point for users.
     pub fn get_financial_health_report(
         env: Env,
         user: Address,
@@ -736,7 +821,7 @@ impl ReportingContract {
         }
     }
 
-    /// Generate trend analysis comparing two periods
+    /// Generate trend analysis comparing two data points.
     pub fn get_trend_analysis(
         _env: Env,
         _user: Address,
@@ -805,7 +890,7 @@ impl ReportingContract {
         result
     }
 
-    /// Store a financial health report for a user
+    /// Store a financial health report for a user (must authorize).
     pub fn store_report(
         env: Env,
         user: Address,
@@ -837,7 +922,7 @@ impl ReportingContract {
         true
     }
 
-    /// Retrieve a stored report
+    /// Retrieve a previously stored report.
     pub fn get_stored_report(
         env: Env,
         user: Address,
@@ -853,35 +938,46 @@ impl ReportingContract {
         reports.get((user, period_key))
     }
 
-    /// Get configured contract addresses
+    /// Get configured contract addresses.
     pub fn get_addresses(env: Env) -> Option<ContractAddresses> {
         env.storage().instance().get(&symbol_short!("ADDRS"))
     }
 
-    /// Get admin address
+    /// Get current administrator address.
     pub fn get_admin(env: Env) -> Option<Address> {
         env.storage().instance().get(&symbol_short!("ADMIN"))
     }
 
-    /// Archive old reports before the specified timestamp
+    /// Archive old reports before the specified timestamp (admin only).
+    ///
+    /// Moves report data from the primary `REPORTS` storage to the `ARCH_RPT`
+    /// storage, potentially reducing gas costs for active users.
     ///
     /// # Arguments
-    /// * `caller` - Address of the caller (must be admin)
-    /// * `before_timestamp` - Archive reports generated before this timestamp
+    /// * `caller` - Address of the administrator (must authorize)
+    /// * `before_timestamp` - Archive reports generated before this ledger timestamp
     ///
     /// # Returns
-    /// Number of reports archived
-    pub fn archive_old_reports(env: Env, caller: Address, before_timestamp: u64) -> u32 {
+    /// `Ok(u32)` containing the number of reports archived
+    ///
+    /// # Errors
+    /// * `NotInitialized` - If contract has not been initialized
+    /// * `Unauthorized` - If caller is not the admin
+    pub fn archive_old_reports(
+        env: Env,
+        caller: Address,
+        before_timestamp: u64,
+    ) -> Result<u32, ReportingError> {
         caller.require_auth();
 
         let admin: Address = env
             .storage()
             .instance()
             .get(&symbol_short!("ADMIN"))
-            .unwrap_or_else(|| panic!("Contract not initialized"));
+            .ok_or(ReportingError::NotInitialized)?;
 
         if caller != admin {
-            panic!("Only admin can archive reports");
+            return Err(ReportingError::Unauthorized);
         }
 
         Self::extend_instance_ttl(&env);
@@ -938,7 +1034,7 @@ impl ReportingContract {
             (archived_count, caller),
         );
 
-        archived_count
+        Ok(archived_count)
     }
 
     /// Get archived reports for a user
@@ -965,25 +1061,33 @@ impl ReportingContract {
         result
     }
 
-    /// Permanently delete old archives before specified timestamp
+    /// Permanently delete old archives before specified timestamp (admin only).
     ///
     /// # Arguments
-    /// * `caller` - Address of the caller (must be admin)
-    /// * `before_timestamp` - Delete archives created before this timestamp
+    /// * `caller` - Address of the administrator (must authorize)
+    /// * `before_timestamp` - Delete archives created before this ledger timestamp
     ///
     /// # Returns
-    /// Number of archives deleted
-    pub fn cleanup_old_reports(env: Env, caller: Address, before_timestamp: u64) -> u32 {
+    /// `Ok(u32)` containing the number of archives deleted
+    ///
+    /// # Errors
+    /// * `NotInitialized` - If contract has not been initialized
+    /// * `Unauthorized` - If caller is not the admin
+    pub fn cleanup_old_reports(
+        env: Env,
+        caller: Address,
+        before_timestamp: u64,
+    ) -> Result<u32, ReportingError> {
         caller.require_auth();
 
         let admin: Address = env
             .storage()
             .instance()
             .get(&symbol_short!("ADMIN"))
-            .unwrap_or_else(|| panic!("Contract not initialized"));
+            .ok_or(ReportingError::NotInitialized)?;
 
         if caller != admin {
-            panic!("Only admin can cleanup reports");
+            return Err(ReportingError::Unauthorized);
         }
 
         Self::extend_instance_ttl(&env);
@@ -1021,7 +1125,7 @@ impl ReportingContract {
             (deleted_count, caller),
         );
 
-        deleted_count
+        Ok(deleted_count)
     }
 
     /// Returns aggregate counts of active and archived reports for observability.

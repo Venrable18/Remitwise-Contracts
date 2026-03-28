@@ -24,6 +24,8 @@ mod testsuit {
                         &(now - 1 - i as u64), // due_date < now
                         &false,
                         &0,
+                        &None,
+                        &String::from_str(&env, "XLM"),
                     );
                     env.mock_all_auths();
                 }
@@ -37,6 +39,8 @@ mod testsuit {
                         &(now + 1 + i as u64), // due_date > now
                         &false,
                         &0,
+                        &None,
+                        &String::from_str(&env, "XLM"),
                     );
                     env.mock_all_auths();
                 }
@@ -54,6 +58,12 @@ mod testsuit {
     use soroban_sdk::testutils::{Address as AddressTrait, Ledger, LedgerInfo};
     use soroban_sdk::Env;
     use proptest::prelude::*;
+
+    // Helper to set ledger time with a monotonically increasing sequence.
+    fn set_time(env: &Env, timestamp: u64) {
+        let next_seq = env.ledger().sequence().saturating_add(1);
+        set_ledger_time(env, next_seq, timestamp);
+    }
 
     // Removed local set_time in favor of testutils::set_ledger_time
 
@@ -2721,6 +2731,8 @@ mod testsuit {
             &1_000_000,
             &true, // recurring
             &30,
+            &None,
+            &String::from_str(&env, "XLM"),
         );
 
         // Before payment: one unpaid bill of 500
@@ -2736,7 +2748,6 @@ mod testsuit {
             "after paying a recurring bill, the newly created bill must appear in total_unpaid"
         );
     }
-}
 
     #[test]
     fn test_batch_pay_bills_mixed_success() {

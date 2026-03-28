@@ -6,7 +6,7 @@ use super::*;
 use soroban_sdk::testutils::storage::Instance as _;
 use soroban_sdk::{
     testutils::{Address as AddressTrait, Events, Ledger, LedgerInfo},
-    Address, Env, IntoVal, String, Symbol, TryFromVal,
+    Address, Env, IntoVal, String, Symbol, TryFromVal, Vec as SorobanVec,
 };
 
 use testutils::set_ledger_time;
@@ -16,10 +16,10 @@ use testutils::set_ledger_time;
 #[test]
 fn test_create_goal_unique_ids_succeeds() {
     let env = Env::default();
-    env.mock_all_auths();
     let contract_id = env.register_contract(None, SavingsGoalContract);
     let client = SavingsGoalContractClient::new(&env, &contract_id);
     let user = Address::generate(&env);
+    env.mock_all_auths();
     client.init();
 
     let name1 = String::from_str(&env, "Goal 1");
@@ -510,10 +510,10 @@ fn test_exact_goal_completion() {
 #[test]
 fn test_set_time_lock_succeeds() {
     let env = Env::default();
-    env.mock_all_auths();
     let contract_id = env.register_contract(None, SavingsGoalContract);
     let client = SavingsGoalContractClient::new(&env, &contract_id);
     let owner = Address::generate(&env);
+    env.mock_all_auths();
     client.init();
     set_ledger_time(&env, 1, 1000);
 
@@ -2435,4 +2435,325 @@ fn test_last_executed_set_to_current_time() {
         Some(5000),
         "last_executed must equal current_time (5000), not next_due (3000)"
     );
+}
+
+#[test]
+fn test_add_tags_to_goal_unauthorized() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, SavingsGoalContract);
+    let client = SavingsGoalContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+    let other = Address::generate(&env);
+
+    client.init();
+    env.mock_all_auths();
+    let goal_id = client.create_goal(&user, &String::from_str(&env, "Tagged"), &1000, &2000000000);
+
+    let mut tags = SorobanVec::new(&env);
+    tags.push_back(String::from_str(&env, "urgent"));
+
+    let res = client.try_add_tags_to_goal(&other, &goal_id, &tags);
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_remove_tags_from_goal_unauthorized() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, SavingsGoalContract);
+    let client = SavingsGoalContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+    let other = Address::generate(&env);
+
+    client.init();
+    env.mock_all_auths();
+    let goal_id = client.create_goal(&user, &String::from_str(&env, "Tagged"), &1000, &2000000000);
+    let mut tags = SorobanVec::new(&env);
+    tags.push_back(String::from_str(&env, "urgent"));
+    client.add_tags_to_goal(&user, &goal_id, &tags);
+
+    let res = client.try_remove_tags_from_goal(&other, &goal_id, &tags);
+    assert!(res.is_err());
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Auth, InvalidAction)")]
+fn test_add_tags_to_goal_non_owner_auth_failure() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, SavingsGoalContract);
+    let client = SavingsGoalContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+    let other = Address::generate(&env);
+
+    client.init();
+    client.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &user,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "create_goal",
+            args: (
+                &user,
+                String::from_str(&env, "Auth"),
+                1000i128,
+                2000000000u64,
+            )
+                .into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let goal_id = client.create_goal(&user, &String::from_str(&env, "Auth"), &1000, &2000000000);
+    let mut tags = SorobanVec::new(&env);
+    tags.push_back(String::from_str(&env, "urgent"));
+    client.add_tags_to_goal(&other, &goal_id, &tags);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Auth, InvalidAction)")]
+fn test_remove_tags_from_goal_non_owner_auth_failure() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, SavingsGoalContract);
+    let client = SavingsGoalContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+    let other = Address::generate(&env);
+
+    client.init();
+    client.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &user,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "create_goal",
+            args: (
+                &user,
+                String::from_str(&env, "Auth"),
+                1000i128,
+                2000000000u64,
+            )
+                .into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let goal_id = client.create_goal(&user, &String::from_str(&env, "Auth"), &1000, &2000000000);
+    let mut tags = SorobanVec::new(&env);
+    tags.push_back(String::from_str(&env, "urgent"));
+    client.add_tags_to_goal(&user, &goal_id, &tags);
+    client.remove_tags_from_goal(&other, &goal_id, &tags);
+}
+
+#[test]
+#[should_panic(expected = "Tags cannot be empty")]
+fn test_add_tags_to_goal_empty_tags_panics() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, SavingsGoalContract);
+    let client = SavingsGoalContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    client.init();
+    env.mock_all_auths();
+    let goal_id = client.create_goal(&user, &String::from_str(&env, "Empty"), &1000, &2000000000);
+    let tags = SorobanVec::new(&env);
+    client.add_tags_to_goal(&user, &goal_id, &tags);
+}
+
+#[test]
+#[should_panic(expected = "Tag must be between 1 and 32 characters")]
+fn test_add_tags_to_goal_invalid_tag_length_panics() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, SavingsGoalContract);
+    let client = SavingsGoalContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    client.init();
+    env.mock_all_auths();
+    let goal_id = client.create_goal(&user, &String::from_str(&env, "InvalidTag"), &1000, &2000000000);
+
+    let mut tags = SorobanVec::new(&env);
+    tags.push_back(String::from_str(
+        &env,
+        "this-tag-is-definitely-longer-than-thirty-two-chars",
+    ));
+    client.add_tags_to_goal(&user, &goal_id, &tags);
+}
+
+#[test]
+#[should_panic(expected = "Tag must be between 1 and 32 characters")]
+fn test_add_tags_to_goal_empty_string_tag_panics() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, SavingsGoalContract);
+    let client = SavingsGoalContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    client.init();
+    env.mock_all_auths();
+    let goal_id = client.create_goal(
+        &user,
+        &String::from_str(&env, "InvalidEmptyTag"),
+        &1000,
+        &2000000000,
+    );
+
+    let mut tags = SorobanVec::new(&env);
+    tags.push_back(String::from_str(&env, ""));
+    client.add_tags_to_goal(&user, &goal_id, &tags);
+}
+
+#[test]
+#[should_panic(expected = "Goal not found")]
+fn test_add_tags_to_goal_nonexistent_goal_panics() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, SavingsGoalContract);
+    let client = SavingsGoalContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    client.init();
+    env.mock_all_auths();
+    let mut tags = SorobanVec::new(&env);
+    tags.push_back(String::from_str(&env, "urgent"));
+    client.add_tags_to_goal(&user, &999, &tags);
+}
+
+#[test]
+#[should_panic(expected = "Goal not found")]
+fn test_remove_tags_from_goal_nonexistent_goal_panics() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, SavingsGoalContract);
+    let client = SavingsGoalContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    client.init();
+    env.mock_all_auths();
+    let mut tags = SorobanVec::new(&env);
+    tags.push_back(String::from_str(&env, "urgent"));
+    client.remove_tags_from_goal(&user, &999, &tags);
+}
+
+#[test]
+fn test_add_and_remove_tags_to_goal_success() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, SavingsGoalContract);
+    let client = SavingsGoalContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    client.init();
+    env.mock_all_auths();
+    let goal_id = client.create_goal(&user, &String::from_str(&env, "Travel"), &1000, &2000000000);
+
+    let mut add_tags = SorobanVec::new(&env);
+    add_tags.push_back(String::from_str(&env, "urgent"));
+    add_tags.push_back(String::from_str(&env, "family"));
+    client.add_tags_to_goal(&user, &goal_id, &add_tags);
+
+    let goal_after_add = client.get_goal(&goal_id).unwrap();
+    assert_eq!(goal_after_add.tags.len(), 2);
+    assert_eq!(goal_after_add.tags.get(0).unwrap(), String::from_str(&env, "urgent"));
+    assert_eq!(goal_after_add.tags.get(1).unwrap(), String::from_str(&env, "family"));
+
+    let mut remove_tags = SorobanVec::new(&env);
+    remove_tags.push_back(String::from_str(&env, "urgent"));
+    client.remove_tags_from_goal(&user, &goal_id, &remove_tags);
+
+    let goal_after_remove = client.get_goal(&goal_id).unwrap();
+    assert_eq!(goal_after_remove.tags.len(), 1);
+    assert_eq!(
+        goal_after_remove.tags.get(0).unwrap(),
+        String::from_str(&env, "family")
+    );
+}
+
+#[test]
+fn test_add_tags_to_goal_duplicates_allowed() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, SavingsGoalContract);
+    let client = SavingsGoalContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    client.init();
+    env.mock_all_auths();
+    let goal_id =
+        client.create_goal(&user, &String::from_str(&env, "DuplicateTags"), &1000, &2000000000);
+
+    let mut tags = SorobanVec::new(&env);
+    tags.push_back(String::from_str(&env, "duplicate"));
+    tags.push_back(String::from_str(&env, "duplicate"));
+    client.add_tags_to_goal(&user, &goal_id, &tags);
+
+    let goal = client.get_goal(&goal_id).unwrap();
+    assert_eq!(goal.tags.len(), 2);
+    assert_eq!(
+        goal.tags.get(0).unwrap(),
+        String::from_str(&env, "duplicate")
+    );
+    assert_eq!(
+        goal.tags.get(1).unwrap(),
+        String::from_str(&env, "duplicate")
+    );
+}
+
+#[test]
+fn test_remove_nonexistent_tag_keeps_existing_tags() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, SavingsGoalContract);
+    let client = SavingsGoalContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    client.init();
+    env.mock_all_auths();
+    let goal_id = client.create_goal(&user, &String::from_str(&env, "Tags"), &1000, &2000000000);
+
+    let mut original_tags = SorobanVec::new(&env);
+    original_tags.push_back(String::from_str(&env, "rent"));
+    client.add_tags_to_goal(&user, &goal_id, &original_tags);
+
+    let mut remove_tags = SorobanVec::new(&env);
+    remove_tags.push_back(String::from_str(&env, "food"));
+    client.remove_tags_from_goal(&user, &goal_id, &remove_tags);
+
+    let goal = client.get_goal(&goal_id).unwrap();
+    assert_eq!(goal.tags.len(), 1);
+    assert_eq!(goal.tags.get(0).unwrap(), String::from_str(&env, "rent"));
+}
+
+#[test]
+fn test_tag_operations_emit_events() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, SavingsGoalContract);
+    let client = SavingsGoalContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    client.init();
+    env.mock_all_auths();
+    let goal_id = client.create_goal(&user, &String::from_str(&env, "Events"), &1000, &2000000000);
+
+    let mut tags = SorobanVec::new(&env);
+    tags.push_back(String::from_str(&env, "urgent"));
+    client.add_tags_to_goal(&user, &goal_id, &tags);
+    client.remove_tags_from_goal(&user, &goal_id, &tags);
+
+    let events = env.events().all();
+    let mut found_tags_add = false;
+    let mut found_tags_rem = false;
+
+    for event in events.iter() {
+        let topics = event.1;
+        if topics.len() < 2 {
+            continue;
+        }
+
+        let topic0: Symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+        let topic1 = Symbol::try_from_val(&env, &topics.get(1).unwrap());
+        if topic1.is_err() {
+            continue;
+        }
+        let topic1 = topic1.unwrap();
+
+        if topic0 == symbol_short!("savings") && topic1 == symbol_short!("tags_add") {
+            found_tags_add = true;
+        }
+        if topic0 == symbol_short!("savings") && topic1 == symbol_short!("tags_rem") {
+            found_tags_rem = true;
+        }
+    }
+
+    assert!(found_tags_add, "tags_add event was not emitted");
+    assert!(found_tags_rem, "tags_rem event was not emitted");
 }

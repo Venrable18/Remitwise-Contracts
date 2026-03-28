@@ -26,6 +26,7 @@ The Savings Goals contract allows users to create savings goals, add/withdraw fu
 - Lock/unlock goals for withdrawal control
 - Query goals and completion status
 - Access control for goal management
+- Owner-controlled goal metadata tags
 - Event emission for audit trails
 - Storage TTL management
 - Deterministic cursor pagination with owner-bound consistency checks
@@ -99,6 +100,7 @@ pub struct SavingsGoal {
     pub current_amount: i128,
     pub target_date: u64,
     pub locked: bool,
+    pub tags: Vec<String>,
 }
 ```
 
@@ -228,6 +230,42 @@ Checks if a goal is completed.
 - `goal_id`: ID of the goal
 
 **Returns:** True if current_amount >= target_amount
+
+#### `add_tags_to_goal(env, caller, goal_id, tags)`
+
+Adds metadata tags to a goal.
+
+**Parameters:**
+
+- `caller`: Address of the caller (must authorize and be owner)
+- `goal_id`: ID of the goal
+- `tags`: Tag list to append
+
+**Validation and behavior:**
+
+- Tag list must not be empty
+- Each tag must have length 1..=32
+- Duplicate tags are allowed
+
+**Panics:** If caller is unauthorized, goal not found, or tags are invalid
+
+#### `remove_tags_from_goal(env, caller, goal_id, tags)`
+
+Removes metadata tags from a goal.
+
+**Parameters:**
+
+- `caller`: Address of the caller (must authorize and be owner)
+- `goal_id`: ID of the goal
+- `tags`: Tag list to remove
+
+**Validation and behavior:**
+
+- Tag list must not be empty
+- Each tag must have length 1..=32
+- Removing non-existent tags is a no-op
+
+**Panics:** If caller is unauthorized, goal not found, or tags are invalid
 
 ## Time-lock & Schedules
 
@@ -405,6 +443,8 @@ let executed_ids = client.execute_due_savings_schedules();
 - `SavingsEvent::ScheduleMissed`: When one or more intervals are skipped
 - `SavingsEvent::ScheduleModified`: When a schedule is modified
 - `SavingsEvent::ScheduleCancelled`: When a schedule is cancelled
+- `tags_add`: Emitted when tags are added to a goal (`goal_id`, `owner`, `tags`)
+- `tags_rem`: Emitted when tags are removed from a goal (`goal_id`, `owner`, `tags`)
 
 ## Integration Patterns
 
