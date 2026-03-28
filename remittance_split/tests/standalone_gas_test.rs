@@ -337,31 +337,31 @@ fn test_input_validation_security() {
     let owner = <Address as AddressTrait>::generate(&env);
 
     // Test invalid amount (zero)
-    let _result = client.create_remittance_schedule(
+    let result = client.try_create_remittance_schedule(
         &owner, 
         &0i128, // Invalid: zero amount
         &(env.ledger().timestamp() + 86400), 
         &2_592_000u64
     );
-    // assert!(result.is_err(), "Zero amount should be rejected");
+    assert!(result.is_err(), "Zero amount should be rejected");
 
     // Test invalid amount (negative)
-    let _result = client.create_remittance_schedule(
+    let result = client.try_create_remittance_schedule(
         &owner, 
         &(-1000i128), // Invalid: negative amount
         &(env.ledger().timestamp() + 86400), 
         &2_592_000u64
     );
-    // assert!(result.is_err(), "Negative amount should be rejected");
+    assert!(result.is_err(), "Negative amount should be rejected");
 
     // Test invalid due date (past)
-    let _result = client.create_remittance_schedule(
+    let result = client.try_create_remittance_schedule(
         &owner, 
         &1000i128, 
-        &(env.ledger().timestamp() - 86400), // Invalid: past date
+        &(env.ledger().timestamp() - 10), // Invalid: past due date
         &2_592_000u64
     );
-    // assert!(result.is_err(), "Past due date should be rejected");
+    assert!(result.is_err(), "Past due date should be rejected");
 
     // Test valid parameters work
     let result = client.create_remittance_schedule(

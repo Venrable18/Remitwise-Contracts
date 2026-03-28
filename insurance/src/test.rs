@@ -24,7 +24,7 @@ fn short_name(env: &Env) -> Result<String, ()> {
 }
 
 
-use ::testutils::set_ledger_time;
+use ::testutils::{set_ledger_time, setup_test_env};
 
 // Removed local set_time in favor of testutils::set_ledger_time
 
