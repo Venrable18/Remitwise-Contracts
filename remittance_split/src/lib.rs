@@ -7,7 +7,7 @@ use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token::TokenClient, vec,
     Address, BytesN, Env, IntoVal, Map, Symbol, Vec,
 };
-use remitwise_common::{EventCategory, EventPriority, RemitwiseEvents};
+use remitwise_common::{clamp_limit, EventCategory, EventPriority, RemitwiseEvents};
 
 // Event topics
 const SPLIT_INITIALIZED: Symbol = symbol_short!("init");
@@ -24,18 +24,44 @@ pub struct SplitInitializedEvent {
     pub timestamp: u64,
 }
 
+/// Domain-separated authorization payload for `initialize_split`.
+/// Passed to `require_auth_for_args` to bind the authorization to the
+/// specific operation parameters, preventing replay across different calls.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct SplitAuthPayload {
+    pub domain_id: Symbol,
+    pub network_id: BytesN<32>,
+    pub contract_addr: Address,
+    pub owner_addr: Address,
+    pub nonce_val: u64,
+    pub usdc_contract: Address,
+    pub spending_percent: u32,
+    pub savings_percent: u32,
+    pub bills_percent: u32,
+    pub insurance_percent: u32,
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum RemittanceSplitError {
     AlreadyInitialized = 1,
+    /// The contract has not been initialized yet; `initialize_split` must be called first.
     NotInitialized = 2,
+    /// One or more split percentages are invalid: either a field exceeds 100 or the four
+    /// fields do not sum to exactly 100.
     InvalidPercentages = 3,
     InvalidAmount = 4,
     Overflow = 5,
+    /// The caller is not authorized to perform this operation.
     Unauthorized = 6,
     InvalidNonce = 7,
+    /// The snapshot's `schema_version` is outside the supported range
+    /// `[MIN_SUPPORTED_SCHEMA_VERSION, SCHEMA_VERSION]`.
     UnsupportedVersion = 8,
+    /// The snapshot's `checksum` field does not match the value computed from its contents;
+    /// the payload may have been tampered with or corrupted.
     ChecksumMismatch = 9,
     InvalidDueDate = 10,
     ScheduleNotFound = 11,
@@ -48,6 +74,22 @@ pub enum RemittanceSplitError {
     RequestHashMismatch = 15,
 
     NonceAlreadyUsed = 16,
+
+    /// The snapshot's `initialized` flag is `false`; the config is incomplete and cannot
+    /// be imported.
+    SnapshotNotInitialized = 17,
+
+    /// The snapshot's `config.timestamp` or `exported_at` field is in the future relative
+    /// to the current ledger timestamp, indicating clock manipulation or a replay attack.
+    FutureTimestamp = 18,
+
+    /// The snapshot's embedded `config.owner` does not match the authenticated caller;
+    /// importing would silently transfer ownership to a different address.
+    OwnerMismatch = 19,
+
+    /// A percentage field in the snapshot individually exceeds 100. This check runs before
+    /// the sum check to provide a precise error signal.
+    InvalidPercentageRange = 20,
 }
 
 #[derive(Clone)]
@@ -463,12 +505,12 @@ impl RemittanceSplit {
             || bills_percent > 100
             || insurance_percent > 100
         {
-            return Err(RemittanceSplitError::PercentageOutOfRange);
+            return Err(RemittanceSplitError::InvalidPercentageRange);
         }
         // Global sum invariant.
         let total = spending_percent + savings_percent + bills_percent + insurance_percent;
         if total != 100 {
-            return Err(RemittanceSplitError::PercentagesDoNotSumTo100);
+            return Err(RemittanceSplitError::InvalidPercentages);
         }
         Ok(())
     }
@@ -904,7 +946,9 @@ impl RemittanceSplit {
         }))
     }
 
-    /// Import a previously exported snapshot after validating version and checksum.
+    /// Import a previously exported snapshot, restoring the full `SplitConfig` and
+    /// associated `RemittanceSchedule` list to on-chain storage after running the
+    /// complete validation pipeline.
     ///
     /// # Arguments
     /// * `caller` - Split owner address (must authorize)
@@ -912,12 +956,26 @@ impl RemittanceSplit {
     /// * `snapshot` - Serialized configuration snapshot to restore
     ///
     /// # Errors
-    /// - `Unauthorized` if `caller` is not the split owner or the contract is paused
-    /// - `InvalidNonce` if the replay-protection nonce does not match
-    /// - `UnsupportedVersion` if the snapshot schema version is not supported
-    /// - `ChecksumMismatch` if the snapshot checksum is invalid
-    /// - `PercentagesDoNotSumTo100` if the imported configuration is malformed
-    /// - `NotInitialized` if no existing configuration is present to authorize the caller
+    /// * `UnsupportedVersion` — `snapshot.schema_version` is outside
+    ///   `[MIN_SUPPORTED_SCHEMA_VERSION, SCHEMA_VERSION]`.
+    /// * `ChecksumMismatch` — `snapshot.checksum` does not match the value computed
+    ///   by `compute_checksum` over the snapshot fields.
+    /// * `SnapshotNotInitialized` — `snapshot.config.initialized` is `false`; the
+    ///   snapshot represents an incomplete or factory-default configuration.
+    /// * `InvalidPercentageRange` — at least one of `spending_percent`,
+    ///   `savings_percent`, `bills_percent`, or `insurance_percent` exceeds `100`.
+    /// * `InvalidPercentages` — all four percentage fields are within `[0, 100]` but
+    ///   their sum is not equal to `100`.
+    /// * `InvalidAmount` — `snapshot.config.timestamp` is greater than the current
+    ///   ledger timestamp, indicating a future-dated or replayed payload.
+    /// * `Unauthorized` — `caller` is not the current on-chain owner stored in
+    ///   instance storage, or the contract is paused.
+    /// * `OwnerMismatch` — `snapshot.config.owner` does not equal `caller`, which
+    ///   would silently transfer ownership if allowed.
+    /// * `NotInitialized` — no existing `SplitConfig` is present in instance storage
+    ///   (the contract has not been initialized).
+    /// * `InvalidNonce` — the provided `nonce` has already been used or does not
+    ///   match the expected replay-protection value for `caller`.
     pub fn import_snapshot(
         env: Env,
         caller: Address,
@@ -948,32 +1006,24 @@ impl RemittanceSplit {
             return Err(RemittanceSplitError::SnapshotNotInitialized);
         }
 
-        // 4. Per-field percentage range — reject values that could not have
-        //    been produced by a valid initialize_split / update_split call.
-        if snapshot.config.spending_percent > 100
-            || snapshot.config.savings_percent > 100
-            || snapshot.config.bills_percent > 100
-            || snapshot.config.insurance_percent > 100
-        {
+        // 4 & 5. Per-field percentage range and sum constraint — delegate to
+        //        validate_percentages which checks per-field > 100 first
+        //        (returning InvalidPercentageRange) then sum ≠ 100
+        //        (returning InvalidPercentages).
+        if let Err(e) = Self::validate_percentages(
+            snapshot.config.spending_percent,
+            snapshot.config.savings_percent,
+            snapshot.config.bills_percent,
+            snapshot.config.insurance_percent,
+        ) {
             Self::append_audit(&env, symbol_short!("import"), &caller, false);
-            return Err(RemittanceSplitError::InvalidPercentageRange);
+            return Err(e);
         }
 
-        // 5. Sum constraint
-        let total = snapshot.config.spending_percent
-            + snapshot.config.savings_percent
-            + snapshot.config.bills_percent
-            + snapshot.config.insurance_percent;
-        if total != 100 {
+        // 6. Timestamp sanity — reject payloads whose config timestamp is in the future.
+        if snapshot.config.timestamp > env.ledger().timestamp() {
             Self::append_audit(&env, symbol_short!("import"), &caller, false);
-            return Err(RemittanceSplitError::InvalidPercentages);
-        }
-
-        // 6. Timestamp sanity — reject payloads whose timestamps are in the future.
-        let current_time = env.ledger().timestamp();
-        if snapshot.config.timestamp > current_time || snapshot.exported_at > current_time {
-            Self::append_audit(&env, symbol_short!("import"), &caller, false);
-            return Err(RemittanceSplitError::FutureTimestamp);
+            return Err(RemittanceSplitError::InvalidAmount);
         }
 
         // 7. Caller must be the current contract owner.
@@ -1039,65 +1089,68 @@ impl RemittanceSplit {
 
     /// Verify snapshot integrity without importing it.
     ///
-    /// Runs the same checks as `import_snapshot` (version boundary, checksum,
-    /// initialized flag, per-field range, sum constraint, and timestamp sanity)
-    /// **without** modifying any contract state. Use this as a pre-flight check
-    /// before calling `import_snapshot`.
+    /// Runs the same validation pipeline as `import_snapshot` steps 2–7 — schema
+    /// version boundary, checksum integrity, initialized flag, per-field percentage
+    /// range, percentage sum constraint, and timestamp sanity — **without** modifying
+    /// any contract state. Use this as a read-only pre-flight check before calling
+    /// `import_snapshot`.
     ///
-    /// Returns `Ok(true)` when the snapshot is valid and ready to import.
-    /// Returns an error variant describing the first failing check.
+    /// Returns `Ok(true)` when all checks pass and the snapshot is ready to import.
+    ///
+    /// # Errors
+    /// - `UnsupportedVersion` — `snapshot.schema_version` is outside
+    ///   `[MIN_SUPPORTED_SCHEMA_VERSION, SCHEMA_VERSION]`.
+    /// - `ChecksumMismatch` — the stored checksum does not match the freshly
+    ///   computed digest over the snapshot fields.
+    /// - `SnapshotNotInitialized` — `snapshot.config.initialized` is `false`.
+    /// - `InvalidPercentageRange` — at least one of the four percentage fields
+    ///   individually exceeds `100`.
+    /// - `InvalidPercentages` — all four fields are ≤ 100 but their sum is not `100`.
+    /// - `InvalidAmount` — `snapshot.config.timestamp` is greater than the current
+    ///   ledger timestamp (future-dated payload).
     ///
     /// # Note
-    /// This function does **not** verify ownership mapping (that requires knowing
-    /// which address will perform the import) or nonce validity.
+    /// This function does **not** check ownership mapping or nonce validity; those
+    /// require a specific caller context and are only enforced by `import_snapshot`.
     pub fn verify_snapshot(
         env: Env,
         snapshot: ExportSnapshot,
     ) -> Result<bool, RemittanceSplitError> {
-        // 1. Version boundary
+        // Step 2. Schema version boundary
         if snapshot.schema_version < MIN_SUPPORTED_SCHEMA_VERSION
             || snapshot.schema_version > SCHEMA_VERSION
         {
             return Err(RemittanceSplitError::UnsupportedVersion);
         }
 
-        // 2. Checksum
+        // Step 3. Checksum integrity
         let expected = Self::compute_checksum(
             snapshot.schema_version,
             &snapshot.config,
-            snapshot.exported_at,
+            &snapshot.schedules,
         );
         if snapshot.checksum != expected {
             return Err(RemittanceSplitError::ChecksumMismatch);
         }
 
-        // 3. Initialized flag
+        // Step 4. Initialized flag
         if !snapshot.config.initialized {
             return Err(RemittanceSplitError::SnapshotNotInitialized);
         }
 
-        // 4. Per-field range
-        if snapshot.config.spending_percent > 100
-            || snapshot.config.savings_percent > 100
-            || snapshot.config.bills_percent > 100
-            || snapshot.config.insurance_percent > 100
-        {
-            return Err(RemittanceSplitError::InvalidPercentageRange);
-        }
+        // Steps 5 & 6. Per-field percentage range then sum constraint — delegate to
+        // validate_percentages which returns InvalidPercentageRange for any field > 100
+        // and InvalidPercentages when the sum is not 100.
+        Self::validate_percentages(
+            snapshot.config.spending_percent,
+            snapshot.config.savings_percent,
+            snapshot.config.bills_percent,
+            snapshot.config.insurance_percent,
+        )?;
 
-        // 5. Sum constraint
-        let total = snapshot.config.spending_percent
-            + snapshot.config.savings_percent
-            + snapshot.config.bills_percent
-            + snapshot.config.insurance_percent;
-        if total != 100 {
-            return Err(RemittanceSplitError::InvalidPercentages);
-        }
-
-        // 6. Timestamp sanity
-        let current_time = env.ledger().timestamp();
-        if snapshot.config.timestamp > current_time || snapshot.exported_at > current_time {
-            return Err(RemittanceSplitError::FutureTimestamp);
+        // Step 7. Timestamp sanity — reject future-dated payloads.
+        if snapshot.config.timestamp > env.ledger().timestamp() {
+            return Err(RemittanceSplitError::InvalidAmount);
         }
 
         Ok(true)
@@ -1455,16 +1508,9 @@ impl RemittanceSplit {
             .storage()
             .instance()
             .get(&symbol_short!("NEXT_RSCH"))
-            .unwrap_or(0u32);
-            
-        let next_schedule_id = current_max_id
+            .unwrap_or(0u32)
             .checked_add(1)
             .ok_or(RemittanceSplitError::Overflow)?;
-
-        // Explicit uniqueness check to prevent any potential storage collisions
-        if schedules.contains_key(next_schedule_id) {
-            return Err(RemittanceSplitError::Overflow); // Should be unreachable with monotonic counter
-        }
 
         let schedule = RemittanceSchedule {
             id: next_schedule_id,
