@@ -62,6 +62,12 @@ Each benchmark outputs JSON with the following structure:
 }
 ```
 
+For CI parsing, gas suites may also emit lines prefixed with:
+- `GAS_BENCH_RESULT `: machine-readable benchmark result with baseline/threshold metadata
+- `cpu regression ...` / `mem regression ...`: assertion failures when thresholds are exceeded
+
+This keeps `--nocapture` logs easy to scrape in CI while preserving normal Rust test output.
+
 ## Remittance Split Schedule Operations
 
 The remittance split contract includes comprehensive benchmarks for schedule lifecycle operations:
@@ -90,6 +96,20 @@ All benchmarks include security validations:
 2. **Data Isolation**: Ensures users can only access their own data
 3. **Input Validation**: Tests with valid parameters to ensure proper validation
 4. **Edge Cases**: Covers boundary conditions and error scenarios
+
+## Bill Payments Archive and Batch Suite
+
+`bill_payments/tests/gas_bench.rs` includes dedicated regression coverage for:
+- `archive_paid_bills/120_paid_1_unpaid_preserved`
+- `restore_bill/single_archived_owner_restore`
+- `bulk_cleanup_bills/mixed_age_20_of_30_deleted`
+- `batch_pay_bills/mixed_batch_50_partial_success`
+
+Security assumptions validated in these benches:
+- Archive and cleanup are maintenance operations over paid/archived data only
+- Restore is owner-only
+- Batch pay preserves owner isolation and deterministic partial success
+- Oversized batches are rejected (`BatchTooLarge`)
 
 ## Regression Detection
 

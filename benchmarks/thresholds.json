@@ -37,6 +37,26 @@
       "mem_percent": 10,
       "description": "Higher CPU threshold for aggregation operations"
     },
+    "archive_paid_bills": {
+      "cpu_percent": 15,
+      "mem_percent": 12,
+      "description": "Archive scans bill storage and writes archive records"
+    },
+    "restore_bill": {
+      "cpu_percent": 12,
+      "mem_percent": 10,
+      "description": "Single-record restore with owner authorization checks"
+    },
+    "bulk_cleanup_bills": {
+      "cpu_percent": 15,
+      "mem_percent": 12,
+      "description": "Cleanup iterates archived records and removes matched entries"
+    },
+    "batch_pay_bills": {
+      "cpu_percent": 15,
+      "mem_percent": 12,
+      "description": "Mixed batch processing with per-item validation and partial success"
+    },
     "get_all_goals": {
       "cpu_percent": 12,
       "mem_percent": 12,

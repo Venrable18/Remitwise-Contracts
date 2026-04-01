@@ -1085,6 +1085,14 @@ impl BillPayments {
         Ok(())
     }
 
+    /// @notice Archive paid bills with `paid_at < before_timestamp`.
+    /// @dev Permissionless maintenance operation. Caller must authenticate, but does not need to
+    /// own each archived bill. Only paid bills with a historical payment timestamp are moved from
+    /// active storage into archival storage.
+    /// @param caller Authenticated caller executing archive maintenance.
+    /// @param before_timestamp Exclusive upper bound for `paid_at`.
+    /// @return Number of bills archived in this call.
+    /// @security Unpaid bills are never archived; owner data is preserved on archived records.
     pub fn archive_paid_bills(
         env: Env,
         caller: Address,
@@ -1216,6 +1224,12 @@ impl BillPayments {
         Ok(())
     }
 
+    /// @notice Permanently delete archived bills with `archived_at < before_timestamp`.
+    /// @dev Permissionless maintenance operation for archive compaction.
+    /// @param caller Authenticated caller executing cleanup.
+    /// @param before_timestamp Exclusive upper bound for `archived_at`.
+    /// @return Number of archived records removed.
+    /// @security Only archived data is touched; active bills are unaffected.
     pub fn bulk_cleanup_bills(
         env: Env,
         caller: Address,
@@ -1258,25 +1272,16 @@ impl BillPayments {
         Ok(deleted_count)
     }
 
-    /// Pay multiple bills in a single batch.
+    /// @notice Pay multiple bills in one call.
     ///
-    /// # Semantics: Partial Success
-    /// This function implements deterministic partial result reporting. If a bill in the batch
-    /// is invalid (e.g., not found, unauthorized, or already paid), it will be skipped,
-    /// and an error event will be emitted. Other valid bills in the same batch will still be processed.
+    /// @dev Partial-success semantics are deterministic: invalid bill IDs are skipped and reported,
+    /// while valid IDs continue processing.
     ///
-    /// # Arguments
-    /// * `env` - The Soroban environment
-    /// * `caller` - Address of the bill owner (must authorize)
-    /// * `bill_ids` - Vector of bill IDs to pay
-    ///
-    /// # Returns
-    /// The number of successfully paid bills.
-    ///
-    /// # Events
-    /// - `paid`: Emitted for each successful payment.
-    /// - `bill_pay_failed`: Emitted for each failed payment with (bill_id, error_code).
-    /// - `batch_pay_summary`: Emitted at the end with (success_count, failure_count).
+    /// @param caller Authenticated owner attempting the batch payment.
+    /// @param bill_ids Candidate bill IDs to process.
+    /// @return Number of successfully paid bills.
+    /// @security Cross-owner payments are rejected per item; oversized batches are rejected
+    /// before iteration.
     pub fn batch_pay_bills(env: Env, caller: Address, bill_ids: Vec<u32>) -> Result<u32, Error> {
         caller.require_auth();
         Self::require_not_paused(&env, pause_functions::PAY_BILL)?;

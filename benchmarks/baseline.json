@@ -102,6 +102,38 @@
     "cpu": 1251484,
     "mem": 250040,
     "description": "Query schedules in worst-case scenario with 50 schedules"
+  },
+  {
+    "contract": "bill_payments",
+    "method": "archive_paid_bills",
+    "scenario": "120_paid_1_unpaid_preserved",
+    "cpu": 640000,
+    "mem": 150000,
+    "description": "Archive 120 paid bills while preserving one unpaid bill"
+  },
+  {
+    "contract": "bill_payments",
+    "method": "restore_bill",
+    "scenario": "single_archived_owner_restore",
+    "cpu": 90000,
+    "mem": 20000,
+    "description": "Restore one archived bill with owner-only authorization checks"
+  },
+  {
+    "contract": "bill_payments",
+    "method": "bulk_cleanup_bills",
+    "scenario": "mixed_age_20_of_30_deleted",
+    "cpu": 250000,
+    "mem": 70000,
+    "description": "Cleanup deletes only older archived entries in a mixed-age archive set"
+  },
+  {
+    "contract": "bill_payments",
+    "method": "batch_pay_bills",
+    "scenario": "mixed_batch_50_partial_success",
+    "cpu": 900000,
+    "mem": 140000,
+    "description": "Batch pay with valid, already-paid, unauthorized, and missing bill IDs"
   }
   ,
   {
