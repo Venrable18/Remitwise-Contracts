@@ -2170,17 +2170,6 @@ fn test_get_stored_report_missing_key_returns_none() {
     let contract_id = env.register_contract(None, ReportingContract);
     let client = ReportingContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-<<<<<<< feature/reporting-address-config-integrity
-    let user = Address::generate(&env);
-
-    env.mock_all_auths();
-    client.init(&admin);
-
-    // `mock_all_auths` would make any address "authorized"; clear custom auths so `require_auth` fails.
-    env.mock_auths(&[]);
-
-    client.get_remittance_summary(&user, &1000, &0, &100);
-=======
     client.init(&admin);
 
     let user = Address::generate(&env);
@@ -2189,5 +2178,4 @@ fn test_get_stored_report_missing_key_returns_none() {
         result.is_none(),
         "missing report must return None, not panic"
     );
->>>>>>> main
 }

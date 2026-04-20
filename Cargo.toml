@@ -18,13 +18,8 @@ members = [
     "scenarios",
 
     "testutils",
-<<<<<<< test/insurance-auth-lifecycle-matrix
     "integration_tests",
     "remitwise-common",
-=======
->>>>>>> main
-
-    "integration_tests",
 ]
 default-members = [
     "remittance_split",

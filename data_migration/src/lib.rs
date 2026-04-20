@@ -861,7 +861,7 @@ mod tests {
             import_goals_from_csv(csv.as_bytes()),
             Err(MigrationError::TooManyRecords {
                 count,
-                max: MAX_MIGRATION_RECORDS,
+                max,
             }) if count == MAX_MIGRATION_RECORDS + 1 && max == MAX_MIGRATION_RECORDS
         ));
     }
