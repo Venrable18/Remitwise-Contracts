@@ -62,6 +62,8 @@ pub enum RemittanceSplitError {
     OwnerMismatch = 20,
     NonceAlreadyUsed = 16,
     PercentageOutOfRange = 17,
+    /// The owner has reached the maximum number of allowed schedules.
+    ScheduleCapExceeded = 22,
 }
 
 #[derive(Clone)]
@@ -80,6 +82,8 @@ const INSTANCE_BUMP_AMOUNT: u32 = 518400; // ~30 days
 const MAX_USED_NONCES_PER_ADDR: u32 = 256;
 /// Maximum ledger seconds a signed request may remain valid after creation.
 const MAX_DEADLINE_WINDOW_SECS: u64 = 3600; // 1 hour
+/// Maximum number of remittance schedules allowed per owner to prevent storage bloat.
+const MAX_SCHEDULES_PER_OWNER: u32 = 50;
 
 /// Split configuration with owner tracking for access control
 #[derive(Clone)]
@@ -1080,6 +1084,12 @@ impl RemittanceSplit {
             return Err(RemittanceSplitError::Unauthorized);
         }
 
+        // 9. Schedule cap validation — prevent bypass via migration
+        if snapshot.schedules.len() > MAX_SCHEDULES_PER_OWNER as u32 {
+            Self::append_audit(&env, symbol_short!("import"), &caller, false);
+            return Err(RemittanceSplitError::ScheduleCapExceeded);
+        }
+
         Self::extend_instance_ttl(&env);
         env.storage()
             .instance()
@@ -1568,6 +1578,17 @@ impl RemittanceSplit {
         let current_time = env.ledger().timestamp();
         if next_due <= current_time {
             return Err(RemittanceSplitError::InvalidDueDate);
+        }
+
+        // Check schedule cap before creating new schedule
+        let owner_schedules: Vec<u32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::OwnerSchedules(owner.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+        
+        if owner_schedules.len() >= MAX_SCHEDULES_PER_OWNER as u32 {
+            return Err(RemittanceSplitError::ScheduleCapExceeded);
         }
 
         let current_max_id = env
