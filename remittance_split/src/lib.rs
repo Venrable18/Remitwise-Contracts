@@ -108,6 +108,18 @@ pub struct SplitCalculatedEvent {
     pub timestamp: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct DistributionCompletedEvent {
+    pub from: Address,
+    pub total_amount: i128,
+    pub spending_amount: i128,
+    pub savings_amount: i128,
+    pub bills_amount: i128,
+    pub insurance_amount: i128,
+    pub timestamp: u64,
+}
+
 /// Events emitted by the contract for audit trail
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -883,15 +895,36 @@ impl RemittanceSplit {
             token.transfer(&from, &accounts.insurance, &amounts[3]);
         }
 
-        // 10. Advance nonce, record audit, emit event.
+        // 10. Advance nonce, record audit, emit events.
         Self::increment_nonce(&env, &from)?;
         Self::append_audit(&env, symbol_short!("distrib"), &from, true);
+
+        // Emit unstructured event for backward compatibility
         RemitwiseEvents::emit(
             &env,
             EventCategory::Transaction,
             EventPriority::Medium,
             symbol_short!("dist_ok"),
-            (from, total_amount),
+            (from.clone(), total_amount),
+        );
+
+        // Emit structured event for advanced indexing and reconciliation
+        let dist_event = DistributionCompletedEvent {
+            from,
+            total_amount,
+            spending_amount: amounts[0],
+            savings_amount: amounts[1],
+            bills_amount: amounts[2],
+            insurance_amount: amounts[3],
+            timestamp: env.ledger().timestamp(),
+        };
+
+        RemitwiseEvents::emit(
+            &env,
+            EventCategory::Transaction,
+            EventPriority::Medium,
+            symbol_short!("dist_comp"),
+            dist_event,
         );
 
         Ok(true)
