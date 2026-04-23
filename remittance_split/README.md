@@ -376,6 +376,27 @@ Deactivates a schedule.
   - `caller` must be the `config.owner`.
   - Schedule must be `active`.
 
+#### `get_remittance_schedules(env, owner) -> Vec<RemittanceSchedule>`
+
+Returns all remittance schedules for the specified owner, ordered by ID ascending.
+
+- **Ordering Guarantee:** Results are deterministically ordered by schedule ID ascending, ensuring consistent results across queries.
+
+#### `get_remittance_schedules_paginated(env, owner, from_index, limit) -> SchedulePage`
+
+Returns remittance schedules for the specified owner with pagination support.
+
+- **Parameters:**
+  - `owner`: The owner address to query
+  - `from_index`: Zero-based starting index in the schedule list
+  - `limit`: Maximum number of schedules to return (clamped to 50)
+- **Returns:** `SchedulePage` with items ordered by ID ascending, next cursor, and count
+- **Ordering Guarantee:** Results are deterministically ordered by schedule ID ascending, providing stable pagination cursors
+
+#### `get_remittance_schedule(env, schedule_id) -> Option<RemittanceSchedule>`
+
+Returns a single schedule by ID, or `None` if not found.
+
 ## Error Reference
 
 ```rust
