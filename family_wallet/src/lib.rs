@@ -30,7 +30,6 @@ const MAX_BATCH_MEMBERS: u32 = 50;
 
 // Access audit bounds
 const MAX_ACCESS_AUDIT_ENTRIES: u32 = 200;
-
 #[contracttype]
 #[derive(Clone)]
 pub struct AccessAuditEntry {
@@ -263,21 +262,17 @@ pub enum Error {
 impl FamilyWallet {
     pub fn init(env: Env, owner: Address, initial_members: Vec<Address>) -> bool {
         owner.require_auth();
-
         let existing: Option<Address> = env.storage().instance().get(&symbol_short!("OWNER"));
         if existing.is_some() {
             panic!("Wallet already initialized");
         }
-
         Self::extend_instance_ttl(&env);
-
         env.storage()
             .instance()
             .set(&symbol_short!("OWNER"), &owner);
 
         let mut members: Map<Address, FamilyMember> = Map::new(&env);
         let timestamp = env.ledger().timestamp();
-
         members.set(
             owner.clone(),
             FamilyMember {
@@ -288,7 +283,6 @@ impl FamilyWallet {
                 added_at: timestamp,
             },
         );
-
         for member_addr in initial_members.iter() {
             members.set(
                 member_addr.clone(),
@@ -301,7 +295,6 @@ impl FamilyWallet {
                 },
             );
         }
-
         env.storage()
             .instance()
             .set(&symbol_short!("MEMBERS"), &members);
@@ -328,7 +321,6 @@ impl FamilyWallet {
             &symbol_short!("PEND_TXS"),
             &Map::<u64, PendingTransaction>::new(&env),
         );
-
         env.storage().instance().set(
             &symbol_short!("EXEC_TXS"),
             &Map::<u64, ExecutedTxMeta>::new(&env),
@@ -337,7 +329,6 @@ impl FamilyWallet {
         env.storage()
             .instance()
             .set(&symbol_short!("NEXT_TX"), &1u64);
-
         let em_config = EmergencyConfig {
             max_amount: 10000_0000000,
             cooldown: 3600,
@@ -368,7 +359,6 @@ impl FamilyWallet {
     ) -> Result<bool, Error> {
         admin.require_auth();
         Self::require_not_paused(&env);
-
         if role == FamilyRole::Owner {
             return Err(Error::InvalidRole);
         }
@@ -732,7 +722,6 @@ impl FamilyWallet {
 
         tx_id
     }
-
     pub fn sign_transaction(env: Env, signer: Address, tx_id: u64) -> bool {
         signer.require_auth();
         Self::require_not_paused(&env);
