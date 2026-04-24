@@ -62,26 +62,27 @@ Scope: current implementation in this repository, focused on auditability and mi
 - TTL bumps on mutating flows via `extend_instance_ttl`.
 - Schedule IDs allocate from `NEXT_RSCH` (`0 -> 1 -> 2 ...`).
 
-## savings_goals
+### Savings Goals Storage (Scalable DataKey Pattern)
 
-### Keys and value types (instance storage)
-
-| Key | Type | Notes |
+| DataKey Variant | Storage Type | Purpose |
 |---|---|---|
-| `GOALS` | `Map<u32, SavingsGoal>` | Primary goal records |
-| `NEXT_ID` | `u32` | Next savings goal ID |
-| `SAV_SCH` | `Map<u32, SavingsSchedule>` | Recurring savings schedules |
-| `NEXT_SSCH` | `u32` | Next savings schedule ID |
-| `NONCES` | `Map<Address, u64>` | Snapshot import nonce tracking |
-| `AUDIT` | `Vec<AuditEntry>` | Rotating audit log, max 100 |
-| `PAUSE_ADM` | `Address` | Pause admin |
-| `PAUSED` | `bool` | Global pause flag |
+| `NextId` | Instance | Tracks the next unique ID for savings goals. |
+| `Goal(u32)` | Persistent | Individual savings goal record. |
+| `OwnerGoals(Address)` | Persistent | List of active goal IDs for a specific owner. |
+| `ArchivedGoal(u32)` | Persistent | Archived (completed) goal record. |
+| `ArchivedGoalsIndex(Address)` | Persistent | List of archived goal IDs for a specific owner. |
+| `NextScheduleId` | Instance | Tracks the next unique ID for recurring schedules. |
+| `Schedule(u32)` | Persistent | Individual savings schedule record. |
+| `OwnerSchedules(Address)` | Persistent | List of schedule IDs for a specific owner. |
+| `Audit` | Instance | Rotating audit log of contract operations. |
+| `PauseAdmin` | Instance | Administrator address for pause/upgrade control. |
+| `Paused` | Instance | Boolean flag for contract pause state. |
+| `Nonces(Address)` | Instance | Per-user nonce for snapshot import security. |
 | `PAUSED_FN` | `Map<Symbol, bool>` | Per-function pause switches |
 | `UNP_AT` | `u64` | Optional time-locked unpause timestamp |
 | `UPG_ADM` | `Address` | Upgrade admin |
 | `VERSION` | `u32` | Contract version |
 
-### Keys and value types (persistent storage)
 
 | Key | Type | Notes |
 |---|---|---|
