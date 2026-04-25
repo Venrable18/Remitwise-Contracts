@@ -2920,3 +2920,191 @@ fn test_non_expired_admin_can_perform_privileged_operations() {
     let cleanup_result = client.try_cleanup_expired_pending(&admin);
     assert!(cleanup_result.is_ok());
 }
+
+
+#[test]
+#[should_panic(expected = "Emergency transfer cooldown period not elapsed")]
+fn test_emergency_transfer_cooldown_boundary_before_expiry() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let initial_members = vec![&env];
+
+    client.init(&owner, &initial_members);
+
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+
+    StellarAssetClient::new(&env, &token_contract.address()).mint(&owner, &10000_0000000);
+    set_ledger_time(&env, 100, 1000);
+
+    // Cooldown = 3600 seconds
+    client.configure_emergency(&owner, &1000_0000000, &3600u64, &500_0000000, &5000_0000000);
+    client.set_emergency_mode(&owner, &true);
+
+    let recipient = Address::generate(&env);
+    let amount = 500_0000000;
+
+    // First transfer at time 1000
+    client.propose_emergency_transfer(&owner, &token_contract.address(), &recipient, &amount);
+
+    // Advance time to just before cooldown expires (at time 4599, which is 1000 + 3600 - 1)
+    set_ledger_time(&env, 101, 4599);
+    
+    // Second transfer should fail because cooldown hasn't elapsed
+    client.propose_emergency_transfer(&owner, &token_contract.address(), &recipient, &amount);
+}
+
+#[test]
+fn test_emergency_transfer_cooldown_boundary_after_expiry() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let initial_members = vec![&env];
+
+    client.init(&owner, &initial_members);
+
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_client = TokenClient::new(&env, &token_contract.address());
+
+    StellarAssetClient::new(&env, &token_contract.address()).mint(&owner, &10000_0000000);
+    set_ledger_time(&env, 100, 1000);
+
+    // Cooldown = 3600 seconds
+    client.configure_emergency(&owner, &1000_0000000, &3600u64, &500_0000000, &5000_0000000);
+    client.set_emergency_mode(&owner, &true);
+
+    let recipient1 = Address::generate(&env);
+    let recipient2 = Address::generate(&env);
+    let amount = 500_0000000;
+
+    // First transfer at time 1000
+    let _tx_id_1 = client.propose_emergency_transfer(&owner, &token_contract.address(), &recipient1, &amount);
+    assert_eq!(token_client.balance(&recipient1), amount);
+
+    // Advance time to exactly when cooldown expires (at time 4600, which is 1000 + 3600)
+    set_ledger_time(&env, 102, 4600);
+    
+    // Second transfer should succeed because cooldown has now elapsed
+    let _tx_id_2 = client.propose_emergency_transfer(&owner, &token_contract.address(), &recipient2, &amount);
+    assert_eq!(token_client.balance(&recipient2), amount);
+}
+
+#[test]
+#[should_panic(expected = "Emergency daily limit exceeded")]
+fn test_emergency_transfer_daily_limit_exceeded() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let initial_members = vec![&env];
+
+    client.init(&owner, &initial_members);
+
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    
+    // Mint enough for multiple transfers
+    let total = 15000_0000000;
+    StellarAssetClient::new(&env, &token_contract.address()).mint(&owner, &total);
+    
+    set_ledger_time(&env, 100, 1000);
+    
+    // max_amount=1000, cooldown=1, min_balance=500, daily_limit=3000
+    // So we can do 3 transfers of 1000 before hitting the limit
+    client.configure_emergency(&owner, &1000_0000000, &1u64, &500_0000000, &3000_0000000);
+    client.set_emergency_mode(&owner, &true);
+
+    let recipient1 = Address::generate(&env);
+    let recipient2 = Address::generate(&env);
+    let recipient3 = Address::generate(&env);
+    let recipient4 = Address::generate(&env);
+
+    let amount = 1000_0000000;
+
+    // First transfer: 1000 (total = 1000)
+    client.propose_emergency_transfer(&owner, &token_contract.address(), &recipient1, &amount);
+    
+    // Advance past cooldown
+    set_ledger_time(&env, 101, 1002);
+    
+    // Second transfer: 1000 (total = 2000)
+    client.propose_emergency_transfer(&owner, &token_contract.address(), &recipient2, &amount);
+    
+    // Advance past cooldown again
+    set_ledger_time(&env, 102, 1004);
+    
+    // Third transfer: 1000 (total = 3000, exactly at limit)
+    client.propose_emergency_transfer(&owner, &token_contract.address(), &recipient3, &amount);
+    
+    // Advance past cooldown once more
+    set_ledger_time(&env, 103, 1006);
+    
+    // Fourth transfer: 1000 (total = 4000, exceeds limit of 3000)
+    // This should panic
+    client.propose_emergency_transfer(&owner, &token_contract.address(), &recipient4, &amount);
+}
+
+#[test]
+fn test_emergency_transfer_daily_limit_rollover_after_24h() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let initial_members = vec![&env];
+
+    client.init(&owner, &initial_members);
+
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_client = TokenClient::new(&env, &token_contract.address());
+
+    // Mint enough tokens
+    let total = 15000_0000000;
+    StellarAssetClient::new(&env, &token_contract.address()).mint(&owner, &total);
+    
+    // Start at timestamp 1000
+    set_ledger_time(&env, 100, 1000);
+    
+    // max_amount=2000, cooldown=1, min_balance=500, daily_limit=5000
+    client.configure_emergency(&owner, &2000_0000000, &1u64, &500_0000000, &5000_0000000);
+    client.set_emergency_mode(&owner, &true);
+
+    let recipient1 = Address::generate(&env);
+    let recipient2 = Address::generate(&env);
+    let recipient3 = Address::generate(&env);
+
+    let amount = 2000_0000000;
+
+    // First transfer at time 1000: 2000
+    let _tx_id_1 = client.propose_emergency_transfer(&owner, &token_contract.address(), &recipient1, &amount);
+    assert_eq!(token_client.balance(&recipient1), amount);
+
+    // Advance time to 1000 + 86399 seconds (1 second before 24h rollover)
+    // Still within the same 24h window
+    set_ledger_time(&env, 101, 87399);
+    
+    // Transfer 2000 more (total = 4000, still within daily_limit of 5000)
+    let _tx_id_2 = client.propose_emergency_transfer(&owner, &token_contract.address(), &recipient2, &amount);
+    assert_eq!(token_client.balance(&recipient2), amount);
+
+    // Advance time to 1000 + 86400 seconds (exactly 24h later, rollover point)
+    set_ledger_time(&env, 102, 87400);
+    
+    // Now the daily counter should have reset
+    // Transfer 2000 more (this should succeed because counter was reset)
+    let _tx_id_3 = client.propose_emergency_transfer(&owner, &token_contract.address(), &recipient3, &amount);
+    assert_eq!(token_client.balance(&recipient3), amount);
+}
+
