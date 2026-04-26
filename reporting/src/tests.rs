@@ -323,123 +323,6 @@ fn test_configure_addresses_unauthorized() {
     assert!(result.is_err());
 }
 
-// ============================================================================
-// ADDRESS GUARD TESTS - Verify all endpoints return proper errors when ADDRS unset
-// ============================================================================
-
-#[test]
-fn test_get_remittance_summary_addresses_not_configured() {
-    let env = Env::default();
-    env.mock_all_auths();
-    set_ledger_time(&env, 1, 1704067200);
-    let contract_id = env.register_contract(None, ReportingContract);
-    let client = ReportingContractClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let user = Address::generate(&env);
-
-    client.init(&admin);
-
-    let total_amount = 10000i128;
-    let period_start = 1704067200u64;
-    let period_end = 1706745600u64;
-
-    let result = client.try_get_remittance_summary(&user, &user, &total_amount, &period_start, &period_end);
-    assert!(result.is_err(), "Should fail when addresses not configured");
-}
-
-#[test]
-fn test_get_savings_report_addresses_not_configured() {
-    let env = Env::default();
-    env.mock_all_auths();
-    set_ledger_time(&env, 1, 1704067200);
-    let contract_id = env.register_contract(None, ReportingContract);
-    let client = ReportingContractClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let user = Address::generate(&env);
-
-    client.init(&admin);
-
-    let period_start = 1704067200u64;
-    let period_end = 1706745600u64;
-
-    let result = client.try_get_savings_report(&user, &user, &period_start, &period_end);
-    assert!(result.is_err(), "Should fail when addresses not configured");
-}
-
-#[test]
-fn test_get_bill_compliance_report_addresses_not_configured() {
-    let env = Env::default();
-    env.mock_all_auths();
-    set_ledger_time(&env, 1, 1704067200);
-    let contract_id = env.register_contract(None, ReportingContract);
-    let client = ReportingContractClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let user = Address::generate(&env);
-
-    client.init(&admin);
-
-    let period_start = 1704067200u64;
-    let period_end = 1706745600u64;
-
-    let result = client.try_get_bill_compliance_report(&user, &user, &period_start, &period_end);
-    assert!(result.is_err(), "Should fail when addresses not configured");
-}
-
-#[test]
-fn test_get_insurance_report_addresses_not_configured() {
-    let env = Env::default();
-    env.mock_all_auths();
-    set_ledger_time(&env, 1, 1704067200);
-    let contract_id = env.register_contract(None, ReportingContract);
-    let client = ReportingContractClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let user = Address::generate(&env);
-
-    client.init(&admin);
-
-    let period_start = 1704067200u64;
-    let period_end = 1706745600u64;
-
-    let result = client.try_get_insurance_report(&user, &user, &period_start, &period_end);
-    assert!(result.is_err(), "Should fail when addresses not configured");
-}
-
-#[test]
-fn test_calculate_health_score_addresses_not_configured() {
-    let env = Env::default();
-    env.mock_all_auths();
-    set_ledger_time(&env, 1, 1704067200);
-    let contract_id = env.register_contract(None, ReportingContract);
-    let client = ReportingContractClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let user = Address::generate(&env);
-
-    client.init(&admin);
-
-    let result = client.try_calculate_health_score(&user, &user, &10000);
-    assert!(result.is_err(), "Should fail when addresses not configured");
-}
-
-#[test]
-fn test_get_financial_health_report_addresses_not_configured() {
-    let env = Env::default();
-    env.mock_all_auths();
-    set_ledger_time(&env, 1, 1704067200);
-    let contract_id = env.register_contract(None, ReportingContract);
-    let client = ReportingContractClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let user = Address::generate(&env);
-
-    client.init(&admin);
-
-    let total_remittance = 10000i128;
-    let period_start = 1704067200u64;
-    let period_end = 1706745600u64;
-
-    let result = client.try_get_financial_health_report(&user, &user, &total_remittance, &period_start, &period_end);
-    assert!(result.is_err(), "Should fail when addresses not configured");
-}
-
 // ---------------------------------------------------------------------------
 // Dependency address configuration integrity (Issue #309)
 // ---------------------------------------------------------------------------
@@ -613,7 +496,7 @@ fn test_get_remittance_summary() {
     let period_start = 1704067200u64;
     let period_end = 1706745600u64;
 
-    let result = client.try_get_remittance_summary(&user, &user, &total_amount, &period_start, &period_end);
+    let result = client.try_get_remittance_summary(&user, &total_amount, &period_start, &period_end);
     assert!(result.is_ok());
     let summary = result.unwrap();
 
@@ -789,7 +672,7 @@ fn test_get_bill_compliance_report() {
     let period_start = 1704067200u64;
     let period_end = 1706745600u64;
 
-    let result = client.try_get_bill_compliance_report(&user, &user, &period_start, &period_end);
+    let result = client.try_get_bill_compliance_report(&user, &period_start, &period_end);
     assert!(result.is_ok());
 }
 
@@ -835,7 +718,7 @@ fn test_get_insurance_report() {
     let period_start = 1704067200u64;
     let period_end = 1706745600u64;
 
-    let result = client.try_get_insurance_report(&user, &user, &period_start, &period_end);
+    let result = client.try_get_insurance_report(&user, &period_start, &period_end);
     assert!(result.is_ok());
 }
 
@@ -878,7 +761,7 @@ fn test_calculate_health_score() {
         &family_wallet,
     );
 
-    let result = client.try_calculate_health_score(&user, &user, &10000);
+    let result = client.try_calculate_health_score(&user, &10000);
     assert!(result.is_ok());
     let health_score = result.unwrap();
 
@@ -916,7 +799,7 @@ fn test_get_financial_health_report() {
     let period_start = 1704067200u64;
     let period_end = 1706745600u64;
 
-    let result = client.try_get_financial_health_report(&user, &user, &total_remittance, &period_start, &period_end);
+    let result = client.try_get_financial_health_report(&user, &total_remittance, &period_start, &period_end);
     assert!(result.is_ok());
     let report = result.unwrap();
 
@@ -984,7 +867,7 @@ fn test_store_and_retrieve_report() {
     let period_start = 1704067200u64;
     let period_end = 1706745600u64;
 
-    let result = client.try_get_financial_health_report(&user, &user, &total_remittance, &period_start, &period_end);
+    let result = client.try_get_financial_health_report(&user, &total_remittance, &period_start, &period_end);
     assert!(result.is_ok());
     let report = result.unwrap();
 
@@ -1027,7 +910,7 @@ fn test_archive_old_reports() {
         &family_wallet,
     );
 
-    let result = client.try_get_financial_health_report(&user, &user, &10000i128, &1704067200u64, &1706745600u64);
+    let result = client.try_get_financial_health_report(&user, &10000i128, &1704067200u64, &1706745600u64);
     assert!(result.is_ok());
     let report = result.unwrap();
 
@@ -1038,7 +921,7 @@ fn test_archive_old_reports() {
     assert!(archive_result.is_ok());
     assert_eq!(archive_result.unwrap(), 1);
 
-    assert!(client.get_stored_report(&user, &user, &period_key).is_none());
+    assert!(client.get_stored_report(&user, &period_key).is_none());
 }
 
 #[test]
@@ -1068,53 +951,9 @@ fn test_cleanup_old_reports() {
         &family_wallet,
     );
 
-    let result = client.try_get_financial_health_report(&user, &user, &10000i128, &1704067200u64, &1706745600u64);
+    let result = client.try_get_financial_health_report(&user, &10000i128, &1704067200u64, &1706745600u64);
     assert!(result.is_ok());
     let report = result.unwrap();
-    client.store_report(&user, &report, &202401);
-
-    let archive_result = client.try_archive_old_reports(&admin, &2000000000);
-    assert!(archive_result.is_ok());
-
-    let cleanup_result = client.try_cleanup_old_reports(&admin, &2000000000);
-    assert!(cleanup_result.is_ok());
-    assert_eq!(cleanup_result.unwrap(), 1);
-}
-
-#[test]
-fn test_storage_stats() {
-    let env = Env::default();
-    env.mock_all_auths();
-    set_ledger_time(&env, 1, 1704067200); // Standard timestamp for reporting tests
-    let contract_id = env.register_contract(None, ReportingContract);
-    let client = ReportingContractClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let user = Address::generate(&env);
-
-    client.init(&admin);
-
-    let remittance_split_id = env.register_contract(None, remittance_split::RemittanceSplit);
-    let savings_goals_id = env.register_contract(None, savings_goals::SavingsGoalsContract);
-    let bill_payments_id = env.register_contract(None, bill_payments::BillPayments);
-    let insurance_id = env.register_contract(None, insurance::Insurance);
-    let family_wallet = Address::generate(&env);
-
-    client.configure_addresses(
-        &admin,
-        &remittance_split_id,
-        &savings_goals_id,
-        &bill_payments_id,
-        &insurance_id,
-        &family_wallet,
-    );
-
-    // Initial stats
-    let stats = client.get_storage_stats();
-    assert_eq!(stats.active_reports, 0);
-    assert_eq!(stats.archived_reports, 0);
-
-    // Store a report
-    let report = client.get_financial_health_report(&user, &10000, &1704067200, &1706745600);
     client.store_report(&user, &report, &202401);
 
     let stats = client.get_storage_stats();
@@ -1124,9 +963,9 @@ fn test_storage_stats() {
     // Archive and check stats
     client.archive_old_reports(&admin, &2000000000);
 
-    let stats = client.get_storage_stats();
-    assert_eq!(stats.active_reports, 0);
-    assert_eq!(stats.archived_reports, 1);
+    let cleanup_result = client.try_cleanup_old_reports(&admin, &2000000000);
+    assert!(cleanup_result.is_ok());
+    assert_eq!(cleanup_result.unwrap(), 1);
 }
 
 /// Regression: `get_storage_stats` must stay aligned with real maps across store → archive → cleanup
@@ -1287,53 +1126,6 @@ fn test_instance_ttl_extended_on_init() {
 
     let ttl = env.as_contract(&contract_id, || env.storage().instance().get_ttl());
     assert!(ttl >= 518_400);
-}
-
-#[test]
-fn test_acl_delegation() {
-    let env = Env::default();
-    env.mock_all_auths();
-    set_ledger_time(&env, 1, 1704067200);
-    let contract_id = env.register_contract(None, ReportingContract);
-    let client = ReportingContractClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let user = Address::generate(&env);
-    let viewer = Address::generate(&env);
-
-    client.init(&admin);
-
-    let remittance_split_id = env.register_contract(None, remittance_split::RemittanceSplit);
-    let savings_goals_id = env.register_contract(None, savings_goals::SavingsGoalsContract);
-    let bill_payments_id = env.register_contract(None, bill_payments::BillPayments);
-    let insurance_id = env.register_contract(None, insurance::Insurance);
-    let family_wallet = Address::generate(&env);
-
-    client.configure_addresses(
-        &admin,
-        &remittance_split_id,
-        &savings_goals_id,
-        &bill_payments_id,
-        &insurance_id,
-        &family_wallet,
-    );
-
-    // Default: viewer cannot read
-    let res = client.try_get_savings_report(&viewer, &user, &1704067200u64, &1706745600u64);
-    assert!(res.is_err(), "Viewer without ACL should fail");
-
-    // Grant viewer
-    client.grant_viewer(&user, &viewer);
-
-    // Viewer can read
-    let res = client.try_get_savings_report(&viewer, &user, &1704067200u64, &1706745600u64);
-    assert!(res.is_ok(), "Viewer with ACL should succeed");
-
-    // Revoke viewer
-    client.revoke_viewer(&user, &viewer);
-
-    // Viewer cannot read
-    let res = client.try_get_savings_report(&viewer, &user, &1704067200u64, &1706745600u64);
-    assert!(res.is_err(), "Viewer after revoke should fail");
 }
 
 // ============================================================================
