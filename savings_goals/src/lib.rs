@@ -64,6 +64,11 @@ pub const MAX_PAGE_LIMIT: u32 = 50;
 /// risking edge-case overflow behavior as balances approach `i128::MAX`.
 const MAX_SAFE_GOAL_BALANCE: i128 = i128::MAX / 2;
 
+/// Maximum byte length for goal names to prevent storage bloat and DoS attacks.
+/// Allows reasonable goal names (e.g., "FIRE Goal", "House Down Payment") while
+/// protecting against unbounded string storage.
+const MAX_GOAL_NAME_LEN_BYTES: u32 = 128;
+
 #[contracttype]
 #[derive(Clone)]
 pub struct SavingsGoal {
@@ -238,6 +243,7 @@ pub enum SavingsGoalError {
     InvalidAmount = 8,
     Overflow = 9,
     InvalidTagContent = 10,
+    InvalidGoalName = 11,
 }
 #[contract]
 pub struct SavingsGoalContract;
@@ -288,6 +294,34 @@ impl SavingsGoalContract {
         } else {
             limit
         }
+    }
+
+    /// Validates goal name for security and storage constraints.
+    ///
+    /// # Requirements
+    /// - Name must not be empty
+    /// - Name byte length must not exceed MAX_GOAL_NAME_LEN_BYTES
+    ///
+    /// # Arguments
+    /// - `name`: The goal name to validate
+    ///
+    /// # Returns
+    /// - `Ok(())` if name is valid
+    /// - `Err(SavingsGoalError::InvalidGoalName)` if name violates constraints
+    fn validate_goal_name(name: &String) -> Result<(), SavingsGoalError> {
+        let byte_len = name.len();
+        
+        // Check for empty name
+        if byte_len == 0 {
+            return Err(SavingsGoalError::InvalidGoalName);
+        }
+        
+        // Check for max byte length
+        if byte_len > MAX_GOAL_NAME_LEN_BYTES as usize {
+            return Err(SavingsGoalError::InvalidGoalName);
+        }
+        
+        Ok(())
     }
 
     fn get_pause_admin(env: &Env) -> Option<Address> {
@@ -686,6 +720,12 @@ env.storage().persistent().extend_ttl(&DataKey::Goal(goal_id), INSTANCE_LIFETIME
         owner.require_auth();
         Self::require_not_paused(&env, pause_functions::CREATE_GOAL);
 
+        // Validate goal name before any storage writes to prevent invalid data
+        Self::validate_goal_name(&name).map_err(|e| {
+            Self::append_audit(&env, symbol_short!("create"), &owner, false);
+            e
+        })?;
+
         if target_amount <= 0 {
             Self::append_audit(&env, symbol_short!("create"), &owner, false);
             return Err(SavingsGoalError::InvalidAmount);
@@ -717,6 +757,9 @@ env.storage().persistent().extend_ttl(&DataKey::Goal(goal_id), INSTANCE_LIFETIME
         env.storage().persistent().extend_ttl(&DataKey::Goal(new_id), INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage().instance().set(&DataKey::NextId, &new_id);
         Self::append_owner_goal_id(&env, &owner, new_id);
+
+        // Record successful creation
+        Self::append_audit(&env, symbol_short!("create"), &owner, true);
 
         let event = GoalCreatedEvent {
             goal_id: new_id,
