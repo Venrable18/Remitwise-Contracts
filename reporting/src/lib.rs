@@ -5,7 +5,7 @@ use soroban_sdk::{
     Env, Map, Vec,
 };
 
-use remitwise_common::{Category, CoverageType};
+pub use remitwise_common::{Category, CoverageType};
 
 // Storage TTL constants
 const DAY_IN_LEDGERS: u32 = 17280;
@@ -18,6 +18,20 @@ pub const INSTANCE_LIFETIME_THRESHOLD: u32 = PERSISTENT_LIFETIME_THRESHOLD;
 
 pub const ARCHIVE_BUMP_AMOUNT: u32 = 150 * DAY_IN_LEDGERS; // ~150 days
 pub const ARCHIVE_LIFETIME_THRESHOLD: u32 = 1 * DAY_IN_LEDGERS; // 1 day
+
+/// Maximum number of pages fetched from any single dependency per report call.
+/// Loops that reach this cap mark the result `DataAvailability::Partial` so
+/// callers know the aggregate may be incomplete.
+pub const MAX_DEP_PAGES: u32 = 20;
+
+/// Page size for dependency queries. This is the maximum number of items
+/// fetched per page from bill-payments and insurance contracts.
+/// 
+/// The aggregation loops fetch up to MAX_DEP_PAGES pages, allowing for
+/// up to MAX_DEP_PAGES * DEP_PAGE_LIMIT items to be aggregated.
+/// If the cap is reached, DataAvailability is set to Partial to indicate
+/// the report may be incomplete.
+pub const DEP_PAGE_LIMIT: u32 = 50;
 
 /// Financial health score (0-100)
 #[contracttype]
@@ -99,6 +113,7 @@ pub struct BillComplianceReport {
     pub compliance_percentage: u32,
     pub period_start: u64,
     pub period_end: u64,
+    pub data_availability: DataAvailability,
 }
 
 /// Insurance coverage report
@@ -112,6 +127,7 @@ pub struct InsuranceReport {
     pub coverage_to_premium_ratio: u32,
     pub period_start: u64,
     pub period_end: u64,
+    pub data_availability: DataAvailability,
 }
 
 /// Family spending report
@@ -160,6 +176,8 @@ pub enum ReportingError {
     NotAdminProposed = 5,
     /// Dependency address set is not usable: duplicates or self-reference to this reporting contract.
     InvalidDependencyAddressConfiguration = 6,
+    /// Report period range is invalid (`period_start` is greater than `period_end`).
+    InvalidPeriod = 7,
 }
 
 #[contracttype]
@@ -181,6 +199,15 @@ pub struct ArchivedReport {
     pub health_score: u32,
     pub generated_at: u64,
     pub archived_at: u64,
+}
+
+/// Paginated result for archived reports
+#[contracttype]
+#[derive(Clone)]
+pub struct ArchivedPage {
+    pub items: Vec<ArchivedReport>,
+    pub next_cursor: u32,
+    pub count: u32,
 }
 
 /// Storage statistics for monitoring
@@ -296,6 +323,26 @@ pub struct PolicyPage {
     pub count: u32,
 }
 
+/// Compute `(numerator * scale) / denominator` using checked arithmetic.
+///
+/// Returns `0` when `denominator <= 0` (safe default for percentage/ratio math).
+/// The result is clamped to `[0, scale]` so callers can rely on the output
+/// never exceeding the intended ceiling.
+///
+/// All intermediate arithmetic uses `i128` to avoid overflow on large inputs.
+pub(crate) fn safe_percent(numerator: i128, denominator: i128, scale: i128) -> i128 {
+    if denominator <= 0 {
+        return 0;
+    }
+    // checked_mul returns None on overflow; fall back to 0 (safe default).
+    let scaled = match numerator.checked_mul(scale) {
+        Some(v) => v,
+        None => return scale, // numerator >= denominator in overflow cases → clamp to scale
+    };
+    let result = scaled / denominator;
+    result.clamp(0, scale)
+}
+
 #[contract]
 pub struct ReportingContract;
 
@@ -343,6 +390,14 @@ impl ReportingContract {
             }
         }
 
+        Ok(())
+    }
+
+    /// Validates that a requested report period is logically ordered.
+    fn validate_period(period_start: u64, period_end: u64) -> Result<(), ReportingError> {
+        if period_start > period_end {
+            return Err(ReportingError::InvalidPeriod);
+        }
         Ok(())
     }
 
@@ -481,7 +536,7 @@ impl ReportingContract {
     ///
     /// # Panics
     /// * If `caller` does not authorize the transaction
-    
+
     pub fn configure_addresses(
         env: Env,
         caller: Address,
@@ -543,7 +598,10 @@ impl ReportingContract {
     /// * `NotInitialized` - If contract has not been initialized
     /// * `Unauthorized` - If caller is not the admin
     /// * `AddressesNotConfigured` - If dependency addresses have not been configured
-    pub fn check_dependencies(env: Env, caller: Address) -> Result<Vec<DependencyStatus>, ReportingError> {
+    pub fn check_dependencies(
+        env: Env,
+        caller: Address,
+    ) -> Result<Vec<DependencyStatus>, ReportingError> {
         caller.require_auth();
 
         let admin: Address = env
@@ -573,43 +631,66 @@ impl ReportingContract {
         statuses.push_back(DependencyStatus {
             name: soroban_sdk::String::from_str(&env, "remittance_split"),
             ok: split_ok,
-            error_category: if split_ok { None } else { Some(soroban_sdk::String::from_str(&env, "get_split_failed")) },
+            error_category: if split_ok {
+                None
+            } else {
+                Some(soroban_sdk::String::from_str(&env, "get_split_failed"))
+            },
         });
 
         // Check savings_goals
         let savings_client = SavingsGoalsClient::new(&env, &addresses.savings_goals);
-        let savings_ok = match savings_client.try_get_all_goals(&Address::from_contract_id(&env, &env.current_contract_address())) {
+        let savings_ok = match savings_client.try_get_all_goals(&env.current_contract_address()) {
             Ok(Ok(_)) => true,
             _ => false,
         };
         statuses.push_back(DependencyStatus {
             name: soroban_sdk::String::from_str(&env, "savings_goals"),
             ok: savings_ok,
-            error_category: if savings_ok { None } else { Some(soroban_sdk::String::from_str(&env, "get_all_goals_failed")) },
+            error_category: if savings_ok {
+                None
+            } else {
+                Some(soroban_sdk::String::from_str(&env, "get_all_goals_failed"))
+            },
         });
 
         // Check bill_payments
         let bill_client = BillPaymentsClient::new(&env, &addresses.bill_payments);
-        let bill_ok = match bill_client.try_get_total_unpaid(&Address::from_contract_id(&env, &env.current_contract_address())) {
+        let bill_ok = match bill_client.try_get_total_unpaid(&env.current_contract_address()) {
             Ok(Ok(_)) => true,
             _ => false,
         };
         statuses.push_back(DependencyStatus {
             name: soroban_sdk::String::from_str(&env, "bill_payments"),
             ok: bill_ok,
-            error_category: if bill_ok { None } else { Some(soroban_sdk::String::from_str(&env, "get_total_unpaid_failed")) },
+            error_category: if bill_ok {
+                None
+            } else {
+                Some(soroban_sdk::String::from_str(
+                    &env,
+                    "get_total_unpaid_failed",
+                ))
+            },
         });
 
         // Check insurance
         let insurance_client = InsuranceClient::new(&env, &addresses.insurance);
-        let insurance_ok = match insurance_client.try_get_total_monthly_premium(&Address::from_contract_id(&env, &env.current_contract_address())) {
-            Ok(Ok(_)) => true,
-            _ => false,
-        };
+        let insurance_ok =
+            match insurance_client.try_get_total_monthly_premium(&env.current_contract_address()) {
+                Ok(Ok(_)) => true,
+                _ => false,
+            };
         statuses.push_back(DependencyStatus {
             name: soroban_sdk::String::from_str(&env, "insurance"),
             ok: insurance_ok,
-            error_category: if insurance_ok { None } else { Some(soroban_sdk::String::from_str(&env, "get_total_monthly_premium_failed")) },
+            error_category: if insurance_ok {
+                None
+            } else {
+                Some(soroban_sdk::String::from_str(
+                    &env,
+                    "get_total_monthly_premium_failed",
+                ))
+            },
         });
 
         // Check family_wallet
@@ -621,7 +702,11 @@ impl ReportingContract {
         statuses.push_back(DependencyStatus {
             name: soroban_sdk::String::from_str(&env, "family_wallet"),
             ok: family_ok,
-            error_category: if family_ok { None } else { Some(soroban_sdk::String::from_str(&env, "get_owner_failed")) },
+            error_category: if family_ok {
+                None
+            } else {
+                Some(soroban_sdk::String::from_str(&env, "get_owner_failed"))
+            },
         });
 
         Ok(statuses)
@@ -636,9 +721,15 @@ impl ReportingContract {
         total_amount: i128,
         period_start: u64,
         period_end: u64,
-    ) -> RemittanceSummary {
+    ) -> Result<RemittanceSummary, ReportingError> {
+        Self::validate_period(period_start, period_end)?;
         user.require_auth();
-        Self::get_remittance_summary_internal(&env, total_amount, period_start, period_end)
+        Ok(Self::get_remittance_summary_internal(
+            &env,
+            total_amount,
+            period_start,
+            period_end,
+        ))
     }
 
     fn get_remittance_summary_internal(
@@ -697,7 +788,7 @@ impl ReportingContract {
             });
         }
 
-        RemittanceSummary {
+        Ok(RemittanceSummary {
             total_received: total_amount,
             total_allocated: total_amount,
             category_breakdown: breakdown,
@@ -712,12 +803,19 @@ impl ReportingContract {
     /// Aggregates all goals for a user and calculates overall completion progress.
     pub fn get_savings_report(
         env: Env,
+        caller: Address,
         user: Address,
         period_start: u64,
         period_end: u64,
-    ) -> SavingsReport {
+    ) -> Result<SavingsReport, ReportingError> {
+        Self::validate_period(period_start, period_end)?;
         user.require_auth();
-        Self::get_savings_report_internal(&env, user, period_start, period_end)
+        Ok(Self::get_savings_report_internal(
+            &env,
+            user,
+            period_start,
+            period_end,
+        ))
     }
 
     fn get_savings_report_internal(
@@ -730,7 +828,7 @@ impl ReportingContract {
             .storage()
             .instance()
             .get(&symbol_short!("ADDRS"))
-            .unwrap_or_else(|| panic!("Contract addresses not configured"));
+            .ok_or(ReportingError::AddressesNotConfigured)?;
 
         let savings_client = SavingsGoalsClient::new(env, &addresses.savings_goals);
         let goals = savings_client.get_all_goals(&user);
@@ -741,20 +839,17 @@ impl ReportingContract {
         let total_goals = goals.len();
 
         for goal in goals.iter() {
-            total_target += goal.target_amount;
-            total_saved += goal.current_amount;
+            total_target = total_target.saturating_add(goal.target_amount);
+            total_saved = total_saved.saturating_add(goal.current_amount);
             if goal.current_amount >= goal.target_amount {
-                completed_count += 1;
+                completed_count = completed_count.saturating_add(1);
             }
         }
 
-        let completion_percentage = if total_target > 0 {
-            ((total_saved * 100) / total_target) as u32
-        } else {
-            0
-        };
+        let completion_percentage = safe_percent(total_saved, total_target, 100)
+            .min(100) as u32;
 
-        SavingsReport {
+        Ok(SavingsReport {
             total_goals,
             completed_goals: completed_count,
             total_target,
@@ -762,7 +857,7 @@ impl ReportingContract {
             completion_percentage,
             period_start,
             period_end,
-        }
+        })
     }
 
     /// Generate bill payment compliance report.
@@ -770,12 +865,19 @@ impl ReportingContract {
     /// Analyzes bill statuses and payment deadlines for a specific period.
     pub fn get_bill_compliance_report(
         env: Env,
+        caller: Address,
         user: Address,
         period_start: u64,
         period_end: u64,
-    ) -> BillComplianceReport {
+    ) -> Result<BillComplianceReport, ReportingError> {
+        Self::validate_period(period_start, period_end)?;
         user.require_auth();
-        Self::get_bill_compliance_report_internal(&env, user, period_start, period_end)
+        Ok(Self::get_bill_compliance_report_internal(
+            &env,
+            user,
+            period_start,
+            period_end,
+        ))
     }
 
     fn get_bill_compliance_report_internal(
@@ -788,11 +890,9 @@ impl ReportingContract {
             .storage()
             .instance()
             .get(&symbol_short!("ADDRS"))
-            .unwrap_or_else(|| panic!("Contract addresses not configured"));
+            .ok_or(ReportingError::AddressesNotConfigured)?;
 
         let bill_client = BillPaymentsClient::new(env, &addresses.bill_payments);
-        let page = bill_client.get_all_bills_for_owner(&user, &0u32, &50u32);
-        let all_bills = page.items;
 
         let mut total_bills = 0u32;
         let mut paid_bills = 0u32;
@@ -801,37 +901,49 @@ impl ReportingContract {
         let mut total_amount = 0i128;
         let mut paid_amount = 0i128;
         let mut unpaid_amount = 0i128;
-
         let current_time = env.ledger().timestamp();
+        let mut data_availability = DataAvailability::Complete;
 
-        for bill in all_bills.iter() {
-            // Filter by period
-            if bill.created_at < period_start || bill.created_at > period_end {
-                continue;
-            }
-
-            total_bills += 1;
-            total_amount += bill.amount;
-
-            if bill.paid {
-                paid_bills += 1;
-                paid_amount += bill.amount;
-            } else {
-                unpaid_bills += 1;
-                unpaid_amount += bill.amount;
-                if bill.due_date < current_time {
-                    overdue_bills += 1;
+        let mut cursor = 0u32;
+        let mut pages_fetched = 0u32;
+        loop {
+            let page = bill_client.get_all_bills_for_owner(&user, &cursor, &DEP_PAGE_LIMIT);
+            for bill in page.items.iter() {
+                if bill.created_at < period_start || bill.created_at > period_end {
+                    continue;
+                }
+                total_bills += 1;
+                total_amount += bill.amount;
+                if bill.paid {
+                    paid_bills += 1;
+                    paid_amount += bill.amount;
+                } else {
+                    unpaid_bills += 1;
+                    unpaid_amount += bill.amount;
+                    if bill.due_date < current_time {
+                        overdue_bills += 1;
+                    }
                 }
             }
+            pages_fetched += 1;
+            if page.next_cursor == 0 {
+                break;
+            }
+            if pages_fetched >= MAX_DEP_PAGES {
+                data_availability = DataAvailability::Partial;
+                break;
+            }
+            cursor = page.next_cursor;
         }
 
-        let compliance_percentage = if total_bills > 0 {
-            (paid_bills * 100) / total_bills
-        } else {
+        let compliance_percentage = if total_bills == 0 {
             100
+        } else {
+            safe_percent(paid_bills as i128, total_bills as i128, 100)
+                .min(100) as u32
         };
 
-        BillComplianceReport {
+        Ok(BillComplianceReport {
             total_bills,
             paid_bills,
             unpaid_bills,
@@ -842,6 +954,7 @@ impl ReportingContract {
             compliance_percentage,
             period_start,
             period_end,
+            data_availability,
         }
     }
 
@@ -850,12 +963,19 @@ impl ReportingContract {
     /// Summarizes active policies, coverage amounts, and premium ratios.
     pub fn get_insurance_report(
         env: Env,
+        caller: Address,
         user: Address,
         period_start: u64,
         period_end: u64,
-    ) -> InsuranceReport {
+    ) -> Result<InsuranceReport, ReportingError> {
+        Self::validate_period(period_start, period_end)?;
         user.require_auth();
-        Self::get_insurance_report_internal(&env, user, period_start, period_end)
+        Ok(Self::get_insurance_report_internal(
+            &env,
+            user,
+            period_start,
+            period_end,
+        ))
     }
 
     fn get_insurance_report_internal(
@@ -868,28 +988,39 @@ impl ReportingContract {
             .storage()
             .instance()
             .get(&symbol_short!("ADDRS"))
-            .unwrap_or_else(|| panic!("Contract addresses not configured"));
+            .ok_or(ReportingError::AddressesNotConfigured)?;
 
         let insurance_client = InsuranceClient::new(env, &addresses.insurance);
-        let policy_page = insurance_client.get_active_policies(&user, &0, &50);
-        let policies = policy_page.items;
         let monthly_premium = insurance_client.get_total_monthly_premium(&user);
 
         let mut total_coverage = 0i128;
-        let active_policies = policies.len();
+        let mut active_policies = 0u32;
+        let mut data_availability = DataAvailability::Complete;
 
-        for policy in policies.iter() {
-            total_coverage += policy.coverage_amount;
+        let mut cursor = 0u32;
+        let mut pages_fetched = 0u32;
+        loop {
+            let page = insurance_client.get_active_policies(&user, &cursor, &DEP_PAGE_LIMIT);
+            for policy in page.items.iter() {
+                active_policies += 1;
+                total_coverage += policy.coverage_amount;
+            }
+            pages_fetched += 1;
+            if page.next_cursor == 0 {
+                break;
+            }
+            if pages_fetched >= MAX_DEP_PAGES {
+                data_availability = DataAvailability::Partial;
+                break;
+            }
+            cursor = page.next_cursor;
         }
 
-        let annual_premium = monthly_premium * 12;
-        let coverage_to_premium_ratio = if annual_premium > 0 {
-            ((total_coverage * 100) / annual_premium) as u32
-        } else {
-            0
-        };
+        let annual_premium = monthly_premium.saturating_mul(12);
+        let coverage_to_premium_ratio = safe_percent(total_coverage, annual_premium, 100)
+            .clamp(0, u32::MAX as i128) as u32;
 
-        InsuranceReport {
+        Ok(InsuranceReport {
             active_policies,
             total_coverage,
             monthly_premium,
@@ -897,6 +1028,7 @@ impl ReportingContract {
             coverage_to_premium_ratio,
             period_start,
             period_end,
+            data_availability,
         }
     }
 
@@ -915,7 +1047,7 @@ impl ReportingContract {
             .storage()
             .instance()
             .get(&symbol_short!("ADDRS"))
-            .unwrap_or_else(|| panic!("Contract addresses not configured"));
+            .ok_or(ReportingError::AddressesNotConfigured)?;
 
         // Savings score (0-40 points)
         let savings_client = SavingsGoalsClient::new(env, &addresses.savings_goals);
@@ -923,16 +1055,12 @@ impl ReportingContract {
         let mut total_target = 0i128;
         let mut total_saved = 0i128;
         for goal in goals.iter() {
-            total_target += goal.target_amount;
-            total_saved += goal.current_amount;
+            total_target = total_target.saturating_add(goal.target_amount);
+            total_saved = total_saved.saturating_add(goal.current_amount);
         }
         let savings_score = if total_target > 0 {
-            let progress = ((total_saved * 100) / total_target) as u32;
-            if progress > 100 {
-                40
-            } else {
-                (progress * 40) / 100
-            }
+            let progress = safe_percent(total_saved, total_target, 100).min(100);
+            (safe_percent(progress, 100, 40)).min(40) as u32
         } else {
             20 // Default score if no goals
         };
@@ -959,14 +1087,17 @@ impl ReportingContract {
         let policy_page = insurance_client.get_active_policies(&user, &0, &1);
         let insurance_score = if !policy_page.items.is_empty() { 20 } else { 0 };
 
-        let total_score = savings_score + bills_score + insurance_score;
+        let total_score = savings_score
+            .saturating_add(bills_score)
+            .saturating_add(insurance_score)
+            .min(100);
 
-        HealthScore {
+        Ok(HealthScore {
             score: total_score,
             savings_score,
             bills_score,
             insurance_score,
-        }
+        })
     }
 
     /// Generate comprehensive financial health report combining all metrics.
@@ -974,11 +1105,13 @@ impl ReportingContract {
     /// This is the primary reporting entry point for users.
     pub fn get_financial_health_report(
         env: Env,
+        caller: Address,
         user: Address,
         total_remittance: i128,
         period_start: u64,
         period_end: u64,
-    ) -> FinancialHealthReport {
+    ) -> Result<FinancialHealthReport, ReportingError> {
+        Self::validate_period(period_start, period_end)?;
         user.require_auth();
         let health_score =
             Self::calculate_health_score_internal(&env, user.clone(), total_remittance);
@@ -998,26 +1131,28 @@ impl ReportingContract {
             generated_at,
         );
 
-        FinancialHealthReport {
+        Ok(FinancialHealthReport {
             health_score,
             remittance_summary,
             savings_report,
             bill_compliance,
             insurance_report,
             generated_at,
-        }
+        })
     }
 
     /// Generate trend analysis comparing two data points.
     pub fn get_trend_analysis(
         _env: Env,
-        _user: Address,
+        caller: Address,
+        user: Address,
         current_amount: i128,
         previous_amount: i128,
     ) -> TrendData {
-        let change_amount = current_amount - previous_amount;
+        let change_amount = current_amount.saturating_sub(previous_amount);
         let change_percentage = if previous_amount > 0 {
-            ((change_amount * 100) / previous_amount) as i32
+            safe_percent(change_amount, previous_amount, 100)
+                .clamp(i32::MIN as i128, i32::MAX as i128) as i32
         } else if current_amount > 0 {
             100
         } else {
@@ -1060,9 +1195,10 @@ impl ReportingContract {
         for i in 1..len {
             let (_, prev_amount) = history.get(i - 1).unwrap_or((0, 0));
             let (_, curr_amount) = history.get(i).unwrap_or((0, 0));
-            let change_amount = curr_amount - prev_amount;
+            let change_amount = curr_amount.saturating_sub(prev_amount);
             let change_percentage = if prev_amount > 0 {
-                ((change_amount * 100) / prev_amount) as i32
+                safe_percent(change_amount, prev_amount, 100)
+                    .clamp(i32::MIN as i128, i32::MAX as i128) as i32
             } else if curr_amount > 0 {
                 100
             } else {
@@ -1113,6 +1249,7 @@ impl ReportingContract {
     /// Retrieve a previously stored report.
     pub fn get_stored_report(
         env: Env,
+        caller: Address,
         user: Address,
         period_key: u64,
     ) -> Option<FinancialHealthReport> {
@@ -1186,6 +1323,12 @@ impl ReportingContract {
         let mut archived_count = 0u32;
         let mut to_remove: Vec<(Address, u64)> = Vec::new(&env);
 
+        let mut arch_idx: Map<Address, Vec<u64>> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ARCH_IDX"))
+            .unwrap_or_else(|| Map::new(&env));
+
         for ((user, period_key), report) in reports.iter() {
             if report.generated_at < before_timestamp {
                 let archived_report = ArchivedReport {
@@ -1196,8 +1339,12 @@ impl ReportingContract {
                     archived_at: current_time,
                 };
                 archived.set((user.clone(), period_key), archived_report);
-                to_remove.push_back((user, period_key));
+                to_remove.push_back((user.clone(), period_key));
                 archived_count += 1;
+
+                let mut user_idx = arch_idx.get(user.clone()).unwrap_or_else(|| Vec::new(&env));
+                user_idx.push_back(period_key);
+                arch_idx.set(user, user_idx);
             }
         }
 
@@ -1213,6 +1360,9 @@ impl ReportingContract {
         env.storage()
             .instance()
             .set(&symbol_short!("ARCH_RPT"), &archived);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("ARCH_IDX"), &arch_idx);
 
         Self::extend_archive_ttl(&env);
         Self::update_storage_stats(&env);
@@ -1234,6 +1384,13 @@ impl ReportingContract {
     /// Vec of ArchivedReport structs
     pub fn get_archived_reports(env: Env, user: Address) -> Vec<ArchivedReport> {
         user.require_auth();
+        let arch_idx: Map<Address, Vec<u64>> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ARCH_IDX"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let user_idx = arch_idx.get(user.clone()).unwrap_or_else(|| Vec::new(&env));
         let archived: Map<(Address, u64), ArchivedReport> = env
             .storage()
             .instance()
@@ -1241,12 +1398,69 @@ impl ReportingContract {
             .unwrap_or_else(|| Map::new(&env));
 
         let mut result = Vec::new(&env);
-        for ((addr, _), report) in archived.iter() {
-            if addr == user {
+        for period_key in user_idx.iter() {
+            if let Some(report) = archived.get((user.clone(), period_key)) {
                 result.push_back(report);
             }
         }
         result
+    }
+
+    /// Get a paginated list of archived reports for a user.
+    ///
+    /// # Arguments
+    /// * `user` - Address of the user
+    /// * `cursor` - Starting index in the user's archive list
+    /// * `limit` - Maximum number of reports to return
+    ///
+    /// # Returns
+    /// ArchivedPage containing reports and pagination metadata
+    pub fn get_archived_reports_page(
+        env: Env,
+        user: Address,
+        cursor: u32,
+        limit: u32,
+    ) -> ArchivedPage {
+        user.require_auth();
+
+        let arch_idx: Map<Address, Vec<u64>> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ARCH_IDX"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let user_idx = arch_idx.get(user.clone()).unwrap_or_else(|| Vec::new(&env));
+        let total_count = user_idx.len();
+
+        let archived: Map<(Address, u64), ArchivedReport> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ARCH_RPT"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let mut items = Vec::new(&env);
+        if cursor >= total_count {
+            return ArchivedPage {
+                items,
+                next_cursor: cursor,
+                count: total_count,
+            };
+        }
+
+        let end = (cursor + limit).min(total_count);
+        for i in cursor..end {
+            if let Some(period_key) = user_idx.get(i) {
+                if let Some(report) = archived.get((user.clone(), period_key)) {
+                    items.push_back(report);
+                }
+            }
+        }
+
+        ArchivedPage {
+            items,
+            next_cursor: if end < total_count { end } else { end },
+            count: total_count,
+        }
     }
 
     /// Permanently delete old archives before specified timestamp (admin only).
@@ -1286,13 +1500,31 @@ impl ReportingContract {
             .get(&symbol_short!("ARCH_RPT"))
             .unwrap_or_else(|| Map::new(&env));
 
+        let mut arch_idx: Map<Address, Vec<u64>> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ARCH_IDX"))
+            .unwrap_or_else(|| Map::new(&env));
+
         let mut deleted_count = 0u32;
         let mut to_remove: Vec<(Address, u64)> = Vec::new(&env);
 
         for ((user, period_key), report) in archived.iter() {
             if report.archived_at < before_timestamp {
-                to_remove.push_back((user, period_key));
+                to_remove.push_back((user.clone(), period_key));
                 deleted_count += 1;
+
+                // Update index
+                if let Some(mut user_idx) = arch_idx.get(user.clone()) {
+                    if let Some(idx) = user_idx.iter().position(|k| k == period_key) {
+                        user_idx.remove(idx as u32);
+                        if user_idx.is_empty() {
+                            arch_idx.remove(user);
+                        } else {
+                            arch_idx.set(user, user_idx);
+                        }
+                    }
+                }
             }
         }
 
@@ -1305,6 +1537,9 @@ impl ReportingContract {
         env.storage()
             .instance()
             .set(&symbol_short!("ARCH_RPT"), &archived);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("ARCH_IDX"), &arch_idx);
 
         Self::update_storage_stats(&env);
 
@@ -1385,5 +1620,7 @@ impl ReportingContract {
     }
 }
 
+#[cfg(test)]
+mod events_schema_test;
 #[cfg(test)]
 mod tests;
