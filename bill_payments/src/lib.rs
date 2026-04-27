@@ -19,15 +19,12 @@ const SECONDS_PER_DAY: u64 = 86_400;
 const MAX_CURRENCY_LEN: u32 = 10;
 
 /// Maximum active bills per owner
-const MAX_BILLS_PER_OWNER: u32 = 1_000;
+pub const MAX_BILLS_PER_OWNER: u32 = 1_000;
 
 /// Minimum length for external reference strings
 const MIN_EXTERNAL_REF_LEN: u32 = 1;
 /// Maximum length for external reference strings
 const MAX_EXTERNAL_REF_LEN: u32 = 64;
-
-/// Maximum number of active bills per owner.
-pub const MAX_BILLS_PER_OWNER: u32 = 100;
 
 /// Validates that a currency string contains only ASCII alphabetic characters.
 /// Returns true if the string is valid (all ASCII letters A-Z or a-z).
@@ -4446,7 +4443,8 @@ mod test {
         let name = String::from_str(&env, "Bill");
         let currency = String::from_str(&env, "XLM");
 
-        let bill_id = client.create_bill(&owner, &name, &100, &2000000, &false, &0, &None, &currency);
+        let bill_id =
+            client.create_bill(&owner, &name, &100, &2000000, &false, &0, &None, &currency);
 
         // Non-owner attempts to set external_ref
         let result = client.try_set_external_ref(
@@ -4476,7 +4474,9 @@ mod test {
         let ext_ref = Some(String::from_str(&env, "OWNER-REF-001"));
 
         // Owner creates bill with external_ref
-        let bill_id = client.create_bill(&owner, &name, &100, &2000000, &false, &0, &ext_ref, &currency);
+        let bill_id = client.create_bill(
+            &owner, &name, &100, &2000000, &false, &0, &ext_ref, &currency,
+        );
 
         // Verify external_ref is set
         let bill = client.get_bill(&bill_id).unwrap();
@@ -4505,7 +4505,9 @@ mod test {
         let ext_ref = Some(String::from_str(&env, "OWNER-REF-002"));
 
         // Owner creates bill with external_ref
-        let bill_id = client.create_bill(&owner, &name, &100, &2000000, &false, &0, &ext_ref, &currency);
+        let bill_id = client.create_bill(
+            &owner, &name, &100, &2000000, &false, &0, &ext_ref, &currency,
+        );
 
         // Verify external_ref is set
         let bill = client.get_bill(&bill_id).unwrap();
@@ -4629,7 +4631,8 @@ mod test {
         );
 
         // Create second bill without ref
-        let bill_id_2 = client.create_bill(&owner, &name, &200, &3000000, &false, &0, &None, &currency);
+        let bill_id_2 =
+            client.create_bill(&owner, &name, &200, &3000000, &false, &0, &None, &currency);
 
         // Verify ref is on bill 1
         let bill1 = client.get_bill(&bill_id_1).unwrap();
@@ -4693,7 +4696,10 @@ mod test {
             &Some(ext_ref.clone()),
             &currency,
         );
-        assert!(result.is_ok(), "Other owner should be able to create bill with cleared ref");
+        assert!(
+            result.is_ok(),
+            "Other owner should be able to create bill with cleared ref"
+        );
     }
 
     #[test]
@@ -4802,7 +4808,9 @@ mod test {
         let ext_ref = Some(String::from_str(&env, "AUTH-TEST-REF"));
 
         // Owner creates bill with external_ref
-        let bill_id = client.create_bill(&owner, &name, &100, &2000000, &false, &0, &ext_ref, &currency);
+        let bill_id = client.create_bill(
+            &owner, &name, &100, &2000000, &false, &0, &ext_ref, &currency,
+        );
 
         // Test: Unauthorized SET operation
         let result_set = client.try_set_external_ref(

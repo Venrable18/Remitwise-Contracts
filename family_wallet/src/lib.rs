@@ -268,6 +268,7 @@ pub enum Error {
     TooManySigners = 19,
     InvalidPrecisionConfig = 20,
     InvalidProposalExpiry = 21,
+    MemberAlreadyExists = 22,
 }
 
 #[contractimpl]

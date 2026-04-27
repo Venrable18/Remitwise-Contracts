@@ -501,7 +501,8 @@ fn test_get_remittance_summary() {
     let period_start = 1704067200u64;
     let period_end = 1706745600u64;
 
-    let result = client.try_get_remittance_summary(&user, &total_amount, &period_start, &period_end);
+    let result =
+        client.try_get_remittance_summary(&user, &total_amount, &period_start, &period_end);
     assert!(result.is_ok());
     let summary = result.unwrap();
 
@@ -804,7 +805,12 @@ fn test_get_financial_health_report() {
     let period_start = 1704067200u64;
     let period_end = 1706745600u64;
 
-    let result = client.try_get_financial_health_report(&user, &total_remittance, &period_start, &period_end);
+    let result = client.try_get_financial_health_report(
+        &user,
+        &total_remittance,
+        &period_start,
+        &period_end,
+    );
     assert!(result.is_ok());
     let report = result.unwrap();
 
@@ -872,7 +878,12 @@ fn test_store_and_retrieve_report() {
     let period_start = 1704067200u64;
     let period_end = 1706745600u64;
 
-    let result = client.try_get_financial_health_report(&user, &total_remittance, &period_start, &period_end);
+    let result = client.try_get_financial_health_report(
+        &user,
+        &total_remittance,
+        &period_start,
+        &period_end,
+    );
     assert!(result.is_ok());
     let report = result.unwrap();
 
@@ -915,7 +926,8 @@ fn test_archive_old_reports() {
         &family_wallet,
     );
 
-    let result = client.try_get_financial_health_report(&user, &10000i128, &1704067200u64, &1706745600u64);
+    let result =
+        client.try_get_financial_health_report(&user, &10000i128, &1704067200u64, &1706745600u64);
     assert!(result.is_ok());
     let report = result.unwrap();
 
@@ -956,7 +968,8 @@ fn test_cleanup_old_reports() {
         &family_wallet,
     );
 
-    let result = client.try_get_financial_health_report(&user, &10000i128, &1704067200u64, &1706745600u64);
+    let result =
+        client.try_get_financial_health_report(&user, &10000i128, &1704067200u64, &1706745600u64);
     assert!(result.is_ok());
     let report = result.unwrap();
     client.store_report(&user, &report, &202401);
